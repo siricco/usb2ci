@@ -1,24 +1,26 @@
-Zur Installation des USB-Common Interface von Hauppauge oder Terratec:
+Installation of the USB-Common Interface from Hauppauge or Terratec for the usage with VDR and plugin ddci2:
 
-1) Firmware
-
-    Das Perl-Script "WintvCI_extract_firmware.pl" im Verzeichnis "WinTV-CI/scripte" ausführen.
-    Aus den beiden vorhandenen Windows Treiberdateien wird die Firmware extrahiert.
-    Alle "*.fw" Dateien oder auch nur die für den Hersteller des Adapters in das Verzeichnis /lib/firmware verschieben.
-
-    Die vollständigen WIndows Treiber sind hier zu finden:
-
+1) Getting the Firmware
+    Download the latest Windows Drivers for
+    
+    the Hauppauge WinTV-CI from here
     http://www.hauppauge.de/files/drivers/WinTV-CI_1_3607_26283_WHQL.zip
+    
+    or for the Terratec Cinergy-USBCI from here
     http://terratec.ultron.info/Receiver/Cinergy_CI_USB/Update/Cinergy_CI_USB_Drv_Vista_XP_3.5.0.1.exe
+    
+    Extract the archives, find and copy the File hcw11.sys or USB2CIUSB.sys into the "scripts" folder.
+    
+    After running the Perl-script "WintvCI_extract_firmware.pl" within "scripts" copy/move all 4 resp. 5 created
+    firmwares (*.fw) to the right place for your Linux distribution - usually this is "/lib/firmware"
+    
+2) Building the Linux Kernel Modul
+    Simply run "runmake". This creates the Module "wintv_usb2ci.ko" and installs it under 
+    /lib/modules/KERNELVERSION/extra"
 
-2) Linux Kernel Modul Ver. 0.2
+3) Make sure to have the vdr-plugin ddci2 installed and activated
 
-    Im Ordner WinTV-USB2CI einfach das Shell-Script "runMake" ausführen.
-    Das Modul "wintv-usb2ci.ko" wird erstellt und unter /lib/modules/KERNELVERSION/extra installiert
+4) Insert CAM and smartcard and plug in the USB-CI-Adapter
 
-3) Falls noch nicht vorhanden das VDR-Plugin ddci2 installieren
-
-3) USB-CI Adapter mit CI-Modul und Smartcard anschließen
-
-4) VDR mit Plugin ddci2 starten (wird etwas länger dauern als ohne CI) und dann zu einem zur Smartcard passenden Sender wechseln.
+4) run VDR and switch to a scrambled channel
 
