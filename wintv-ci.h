@@ -1,0 +1,291 @@
+/*
+ * wintv-ci.h : WinTV-CI - USB2 Common Interface driver
+ *
+ * Copyright (C) 2017 Helmut Binder (cco@aon.at)
+ #
+ * (+HB+) 2017-08-13 
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * version 2 only, as published by the Free Software Foundation.
+ *
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * To obtain the license, point your browser to
+ * http://www.gnu.org/copyleft/gpl.html
+ */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+#include <linux/types.h>
+#include <linux/slab.h>
+#include <linux/usb.h>
+
+#include <dvbdev.h>
+#include <linux/dvb/ca.h> // CI_CA_LINK,...
+#include <linux/kthread.h>
+
+#include "dvb_ringbuffer.h"
+
+#define MIN(a,b) (((a)<=(b)) ? (a) : (b))
+#define MAX(a,b) (((a)>=(b)) ? (a) : (b))
+
+/*
+ * --- C O R E  ---
+ */
+
+#define STATUSBIT_FR 0x40
+#define STATUSBIT_DA 0x80
+
+struct ezusb_fx_type {
+	/* EZ-USB Control and Status Register.  Bit 0 controls 8051 reset */
+	unsigned short cpucs_reg;
+	unsigned short internal_ram_size;
+};
+
+struct usb_id_info {
+	const char *fw_ci_name;
+	const char *fw_cb_name;
+	int max_ver_hw;
+	int max_ver_fw;
+	const struct ezusb_fx_type *fx;
+};
+
+/* USB endpoints */
+
+#define USB_EP0_ADDR		0x0
+#define USB_EP0_SIZE		0x40
+
+#define CA_MAX_MSG_SIZE		0xFF
+#define CA_LINK_LAYER_SIZE	CA_MAX_MSG_SIZE
+
+struct msg_reply {
+	unsigned char	buffer[CA_MAX_MSG_SIZE];
+	int		size;
+};
+
+struct slot_info {
+	int		usbci_state;
+	unsigned long	timestamp;
+
+	int		cis_valid;
+	u32		config_base;
+	u8		config_option;
+	int		link_layer_size;
+
+	struct mutex	cam_mutex;
+	int		cam_state;
+	int		cam_state_previous;
+	int		cam_change;
+};
+
+struct urb_transfer {
+	struct urb 	*urb;
+	unsigned char	*xfer_buffer;
+	dma_addr_t	dma_addr;
+};
+
+struct isoc_info {
+	int			uframe_size;	/* maxp */
+	int 			num_uframes;	/* 1..255 */
+	int			transfer_size;
+	int			num_transfers;	/* 1.. */
+	struct urb_transfer	*transfers;	/* <= num_transfers */
+};
+
+struct ca_cmd_sndhd {
+	unsigned char cmd;
+	unsigned char slot;
+	unsigned char xFF;
+	unsigned char len;
+	unsigned char data;
+} __attribute__ ((packed));
+
+struct ca_cmd_rcvhd {
+	unsigned char state;
+	unsigned char flag;
+	unsigned char reply;
+	unsigned char len;
+	unsigned char data;
+} __attribute__ ((packed));
+
+struct bulk_info { /* SEND */
+	union {
+	    unsigned char	*buffer;	/* size = maxp */
+	    struct ca_cmd_sndhd *hdr;
+	} pkt;
+};
+
+struct intr_info { /* RECEIVE */
+	union {
+	    unsigned char	*buffer;	/* size = maxp */
+	    struct ca_cmd_rcvhd *hdr;
+	} pkt;
+	struct {
+	    unsigned char	*buffer;	/* size = CA_MAX_MSG_SIZE */
+	    int			size;
+	} msg;
+};
+
+struct ep_ringbuffer {
+	struct dvb_ringbuffer	buffer;
+	int			num_items;
+	wait_queue_head_t	wq;
+};
+
+struct ep_info {
+	struct wintv_ci_dev *wintvci;
+
+	unsigned char	type;
+	unsigned char	dir;
+	unsigned char	addr;
+	unsigned int	pipe;
+	int		maxp;
+	int		interval;
+
+	union {
+		struct isoc_info isoc;
+		struct bulk_info bulk;
+		struct intr_info intr;
+	} u;
+
+	/* ringbuffer */
+	struct ep_ringbuffer	erb;
+};
+
+struct ca_device {
+	struct wintv_ci_dev	*wintvci;
+
+	struct dvb_device 	*regdev_ca;
+	struct mutex		ca_cmd_mutex;
+	struct mutex		ca_ioctl_mutex;
+
+	wait_queue_head_t	ca_wait_queue_in;
+	wait_queue_head_t	ca_wait_queue_out;
+
+	struct ep_info		ep_intr_in;  /* interrupt */
+	struct ep_info		ep_bulk_out; /* bulk */
+
+	/* PID of the monitoring thread */
+	struct task_struct	*thread;
+	/* Flag indicating the thread should wake up now */
+	unsigned int		wakeup:1;
+	/* Delay the main thread should use */
+	unsigned long		delay;
+
+	int		ca_poll_cnt;
+	unsigned int	ca_last_poll_state;
+};
+
+struct ci_device {
+	struct wintv_ci_dev	*wintvci;
+
+	struct dvb_device	*regdev_ci;
+	struct mutex		ci_mutex;
+
+	struct ep_info		ep_isoc_in;	/* isochronous */
+	struct ep_info		ep_isoc_out;	/* isochronous */
+
+	int			isoc_enabled;		/* streaming 0/1 */
+	int			isoc_urbs_running;	/* #of urbs running */
+	wait_queue_head_t	isoc_urbs_wq;		/* urb wait-queue */
+
+	int		ci_poll_cnt;
+	unsigned int	ci_last_poll_state;
+
+	int		ts_count_total;
+	int		ts_count_interval;
+	unsigned long	ts_count_timeout;
+
+	 /* packets write/read */
+	int		isoc_bytes_RB;
+	int		isoc_bytes_CAM;
+
+	int		CAM_tot_in;
+	int		CAM_tot_out;
+};
+
+#define FW_STATE_COLD  1 /* no firmware loaded */
+#define FW_STATE_EZUSB 2 /* EZUSB basic code-bulker firmware loaded */
+#define FW_STATE_WARM  3 /* CI-firmware loaded */
+
+struct wintv_ci_dev {
+	struct usb_device		*udev; /* the usb device for this device */
+	struct usb_interface		*intf; /* the interface for this device */
+
+	const struct usb_id_info	*info;
+
+	int fw_state;
+
+	struct ca_device		ca_dev; /* TPDU exchange (EN 50221)  */
+	struct ci_device		ci_dev; /* TS-streaming */
+
+	struct slot_info slot;
+
+	u8 ep0_buffer[USB_EP0_SIZE];
+
+	/* logs */
+	u8 last_status;
+	int last_status_cnt;
+
+	/* DVB */
+	struct dvb_adapter	adapter;
+	struct mutex		usb_mutex;
+
+	struct kref		kref;
+};
+
+int CI_50_GetStatus(struct wintv_ci_dev *wintvci, unsigned char *status);
+int CI_20_WriteLPDU(struct wintv_ci_dev *wintvci, char *data, int len);
+int CI_80_ReadLPDU (struct wintv_ci_dev *wintvci, struct msg_reply *reply);
+
+void *ci_kmalloc(int size, int zero, char * caller);
+
+/* CAM status */
+enum {
+	USBCI_STATE_NON = 1,
+	USBCI_STATE_CON,
+	USBCI_STATE_RST,
+	USBCI_STATE_CIS,
+	USBCI_STATE_COR,
+	USBCI_STATE_RDY
+};
+int cam_state_monitor(struct wintv_ci_dev *wintvci);
+int cam_state_set(struct wintv_ci_dev *wintvci, int usbci_state);
+
+
+/*
+ * --- P C M C I A - C I S ---
+ */
+
+int parse_cis(unsigned char *cis, int size, struct slot_info *info);
+
+/*
+ * --- E N 5 0 2 2 1 ---
+ */
+
+void dump_io_tpdu( u8 *buf, size_t count, const char *func, int dir_in);
+
+/*
+ * --- C A - D E V I C E  ( T P D U )
+ */
+//void rb_read_tpdu(struct wintv_ci_dev *wintvci);
+
+int  ca_attach(struct wintv_ci_dev *wintvci);
+void ca_detach(struct wintv_ci_dev *wintvci);
+
+/*
+ * --- C I / S E C - D E V I C E ---
+ */
+
+void ts_urb_complete(struct urb *urb);
+
+void ci_reset(struct wintv_ci_dev *wintvci);
+int  ci_attach(struct wintv_ci_dev *wintvci);
+void ci_detach(struct wintv_ci_dev *wintvci);
+
+/***/
