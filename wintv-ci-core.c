@@ -30,7 +30,6 @@
 #include <linux/delay.h>
 #include <linux/mutex.h>
 
-
 DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
 
 static const struct ezusb_fx_type ezusb_fx = { /* AN21.., FX */
@@ -216,7 +215,6 @@ static struct ci_cmd_info CI_CMD_INFO[] = {
 #define SHOW_CMD_INF 0x1
 #define SHOW_CMD_DEB 0x2
 
-
 static int CI_send_CMD(struct wintv_ci_dev *wintvci, u8 CI_CMD_S,
 					char *data, int data_len, int debug)
 {
@@ -226,33 +224,36 @@ static int CI_send_CMD(struct wintv_ci_dev *wintvci, u8 CI_CMD_S,
 
 	char *msg_ptr		= data;
 	int rem_size		= data_len;
-	int frag_len		= 0;
-	int MAX_frag_len	= ep->maxp - 4; /* 4 byte header */
+	int frag_len, transmitted, rc;
 
-	int transmitted, rc;
+	if (debug & SHOW_CMD_DEB)
+		print_hex_dump(KERN_DEBUG, " CI_send_CMD : ",
+					DUMP_PREFIX_OFFSET, 16, 1,
+					data, data_len, 1);
 
-	if (debug & SHOW_CMD_INF)
-		pr_info("%-20s: [%02X] %d\n",__func__, CI_CMD_S, data_len);
-
-	if (data_len > CA_MAX_MSG_SIZE) { /* wintvci->slot.link_layer_size */
-		pr_err("%s msg-len %d larger then %d bytes\n", __func__,
-						data_len, CA_MAX_MSG_SIZE);
+	if (data_len > CA_CTRL_MAXMSG) { /* == CA_LINK_LAYER_SIZE */
+		pr_err("%s msg (%d) too large for link-layer (%d)\n",
+					__func__, data_len, CA_CTRL_MAXMSG);
+		return CI_ERR_20_LPDU_WRITE;
 	}
 
 	bulk->pkt.hdr->cmd	= CI_CMD_S;
 	bulk->pkt.hdr->slot	= 0;
 	bulk->pkt.hdr->xFF	= 0xff;
 
-	do {
+	do {	/* run command at least once */
 		bulk->pkt.hdr->len = rem_size;
 
-		frag_len = MIN(rem_size, MAX_frag_len);
-		memcpy(&bulk->pkt.hdr->data, msg_ptr, frag_len);
+		frag_len = MIN(rem_size, CA_CTRL_MAXPKT_DATA);
+		rem_size -= frag_len;
 
-		if (debug & SHOW_CMD_DEB)
-			print_hex_dump(KERN_DEBUG, " CI_send_CMD : ",
-						DUMP_PREFIX_OFFSET, 16, 1,
-						bulk->pkt.buffer, frag_len+4, 1);
+		memcpy(&bulk->pkt.hdr->data, msg_ptr, frag_len);
+		msg_ptr += frag_len;
+
+		if ((data_len > CA_CTRL_MAXPKT_DATA) || (debug & SHOW_CMD_INF))
+			pr_info("%-20s: [%02X] %d/%d/%d\n", __func__,
+				bulk->pkt.hdr->cmd, bulk->pkt.hdr->len,
+				frag_len, rem_size);
 
 		rc = usb_bulk_msg(udev, ep->pipe,
 					bulk->pkt.buffer,
@@ -260,16 +261,12 @@ static int CI_send_CMD(struct wintv_ci_dev *wintvci, u8 CI_CMD_S,
 					&transmitted, USB_CMD_TIMEOUT);
 
 		if (rc) {
-			int ep_status = 0;
-			//usb_get_status(wintvci->udev,USB_RECIP_ENDPOINT, ep->addr, &ep_status);
-			pr_err("%-20s: [%02X] rc: %d (w:%d) EP-%X status %02X\n",
+			pr_err("%-20s: [%02X] rc: %d (w:%d)\n",
 				__func__, CI_CMD_S, rc,
-				data_len-rem_size, ep->addr, ep_status);
+				data_len-rem_size);
 			return CI_ERR_E0_USB;
 		}
 
-		msg_ptr  += frag_len;
-		rem_size -= frag_len;
 	} while (rem_size);
 
 	return 0;
@@ -283,62 +280,60 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 	struct intr_info *intr		= &ep->u.intr;
 
 	unsigned char *msg_ptr		= (reply) ? reply->buffer : intr->msg.buffer;
-	int msg_size			= 0;
-
-	int rem_size			= CA_MAX_MSG_SIZE;
-	int frag_len			= 0;
-	int MAX_frag_len		= ep->maxp - 4; /* 4 byte header */
-
-	int transmitted, rc;
+	int msg_len			= -1;
+	int rem_size			= CA_CTRL_MAXMSG;
+	int frag_len, transmitted, rc;
 
 	do {
-		rc = usb_bulk_msg(udev, ep->pipe,
+		rc = usb_interrupt_msg(udev, ep->pipe,
 					intr->pkt.buffer,
-					ep->maxp,
+					CA_CTRL_MAXPKT,
 					&transmitted, USB_CMD_TIMEOUT);
 
 		if (rc || (intr->pkt.hdr->reply != CI_CMD_R)) {
-			int ep_status = 0;
-			/* < 4.15.4 usb_get_status */
-			// if(rc)
-			//	usb_get_status(wintvci->udev,USB_RECIP_ENDPOINT, ep->addr, &ep_status);
 			if (rc != CI_ERR_30_NO_CAM)
-				pr_err("%-20s: [%02X] rc: %d s:%02X f:%02X c:%02X l:%d (r:%d) EP-%X status %02X\n",
+				pr_err("%-20s: [%02X] rc: %d s:%02X f:%02X r:%02X l:%d\n",
 					__func__, CI_CMD_R, rc,
 					intr->pkt.hdr->state, intr->pkt.hdr->flag,
-					intr->pkt.hdr->reply, intr->pkt.hdr->len,
-					rem_size, ep->addr, ep_status);
+					intr->pkt.hdr->reply, intr->pkt.hdr->len);
 			if (rc)
 				return CI_ERR_E0_USB;		/* USB error */
 			else if (intr->pkt.hdr->reply & CI_ERR_ERROR_MASK)
 				return(intr->pkt.hdr->reply);	/* CMD error */
 			else
-				continue; /* ignore reply to allready timedout cmd */
+				continue; /* ignore reply from allready timedout cmd */
 		}
 
-		frag_len = MIN(intr->pkt.hdr->len, MAX_frag_len);
+		if (msg_len < 0) /* get the total msg-len */
+			msg_len = intr->pkt.hdr->len;
+		else if (intr->pkt.hdr->len != rem_size) {/* shpuld never happen */
+			pr_err("%20s: [%02X] data with unexpected len (%d != %d)\n",
+					__func__, intr->pkt.hdr->reply,
+					intr->pkt.hdr->len, rem_size);
+			return CI_ERR_10_LPDU_READ;
+		}
+
+		frag_len = MIN(intr->pkt.hdr->len, CA_CTRL_MAXPKT_DATA);
 		rem_size = intr->pkt.hdr->len - frag_len;
 
 		memcpy(msg_ptr, &intr->pkt.hdr->data, frag_len);
 		msg_ptr += frag_len;
-		msg_size += frag_len;
 
-		if (debug & SHOW_CMD_INF)
-			pr_info("%-20s: [%02X] %d/%d/%d\n",__func__,
-				intr->pkt.hdr->reply, intr->pkt.hdr->len,
-				frag_len, rem_size);
+		if ((msg_len > CA_CTRL_MAXPKT_DATA) || (debug & SHOW_CMD_INF))
+			pr_info("%-20s: [%02X] %d/%d/%d\n",
+				__func__, intr->pkt.hdr->reply,
+				intr->pkt.hdr->len, frag_len, rem_size);
 	} while (rem_size);
 
 	if (reply)
-		reply->size = msg_size;
+		reply->size = msg_len;
 	else
-		intr->msg.size = msg_size;
+		intr->msg.size = msg_len;
 
 	if (debug & SHOW_CMD_DEB)
 		print_hex_dump(KERN_DEBUG, " CI_read_CMD : ",
 					DUMP_PREFIX_OFFSET, 16, 1,
-					msg_ptr - msg_size,
-					msg_size, 1);
+					msg_ptr - msg_len, msg_len, 1);
 
 	return 0;
 }
@@ -918,6 +913,11 @@ static int wintv_usb_ci_setup_endpoints(struct wintv_ci_dev *wintvci)
 		!wintvci->ci_dev.ep_isoc_out.addr ) {
 
 		pr_info(" *ERR* not all expected endpoints found\n");
+		return(0);
+	}
+	if (	(wintvci->ca_dev.ep_intr_in.maxp < CA_CTRL_MAXPKT) ||
+		(wintvci->ca_dev.ep_bulk_out.maxp < CA_CTRL_MAXPKT) ) {
+		pr_info(" *ERR* invalid packet-size in control-interface(s)\n");
 		return(0);
 	}
 
