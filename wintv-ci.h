@@ -60,11 +60,20 @@ struct usb_id_info {
 #define USB_EP0_ADDR		0x0
 #define USB_EP0_SIZE		0x40
 
-#define CA_MAX_MSG_SIZE		0xFF
-#define CA_LINK_LAYER_SIZE	CA_MAX_MSG_SIZE
+/* Control-interface in/out max. packet-size*/
+#define CA_CTRL_MAXPKT		0x40
+#define CA_CTRL_MAXPKT_DATA	(CA_CTRL_MAXPKT - 4) /* -4 byte cmd-header */
+/* Control interface max. message-size */
+#define CA_CTRL_MAXMSG		0xFF
+/* Control interface max. TPDU-size */
+#define CA_CTRL_MAXTPDU		4096
+
+/* Link-Layer max. message-size */
+#define CA_LINK_LAYER_SIZE	CA_CTRL_MAXMSG
+#define CA_LINK_LAYER_DATA	(CA_LINK_LAYER_SIZE - 2)
 
 struct msg_reply {
-	unsigned char	buffer[CA_MAX_MSG_SIZE];
+	unsigned char	buffer[CA_CTRL_MAXMSG];
 	int		size;
 };
 

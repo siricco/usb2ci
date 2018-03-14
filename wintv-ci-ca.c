@@ -27,11 +27,9 @@
 
 #include "wintv-ci.h"
 
-#define CA_TPDU_MAX_SIZE 4096
-#define CA_RB_ITEMS 100 /* 100 x LL-size = ~ 16 x MAX_TPDU */
-
 /* show some TPDU massages */
 #define DEBUG_TPDU
+
 /* a lot of CA in/out massages */
 //#define DEBUG_CA_IO
 
@@ -63,7 +61,7 @@ static int ca_rb_alloc(struct ep_info *ep, int size)
 static int ca_bulk_allocate(struct ep_info *ep)
 {
 	struct bulk_info *bulk	= &ep->u.bulk;
-	int pkt_size		= ep->maxp;
+	int pkt_size		= CA_CTRL_MAXPKT;
 
 	pr_info("%s : EP(%02X) init packet buffer: %d bytes\n",
 				__func__, ep->addr,pkt_size);
@@ -78,8 +76,8 @@ static int ca_bulk_allocate(struct ep_info *ep)
 static int ca_intr_allocate(struct ep_info *ep)
 {
 	struct intr_info *intr	= &ep->u.intr;
-	int pkt_size		= ep->maxp;
-	int msg_size		= CA_MAX_MSG_SIZE;
+	int pkt_size		= CA_CTRL_MAXPKT;
+	int msg_size		= CA_CTRL_MAXMSG;
 
 	pr_info("%s : EP(%02X) init packet/message buffers: %d/%d bytes\n",
 				__func__, ep->addr, pkt_size, msg_size);
@@ -112,13 +110,15 @@ static void ca_intr_bulk_exit(struct ca_device *ca_dev)
 	ca_rb_free(ep);
 }
 
+#define CA_RB_ITEMS 100 /* 100 x LL-size = ca. 16 x MAX_TPDU */
+
 static int ca_intr_bulk_init(struct ca_device *ca_dev)
 {
 	struct ep_info *ep;
 	int rc;
 
 	ep = &ca_dev->ep_bulk_out;
-	rc = ca_rb_alloc(ep, CA_RB_ITEMS * (CA_LINK_LAYER_SIZE+2));
+	rc = ca_rb_alloc(ep, CA_RB_ITEMS * CA_LINK_LAYER_SIZE);
 	if (rc)
 		return rc;
 	rc = ca_bulk_allocate(ep); /* only packet-out buffer */
@@ -126,7 +126,7 @@ static int ca_intr_bulk_init(struct ca_device *ca_dev)
 		return rc;
 
 	ep = &ca_dev->ep_intr_in;
-	rc = ca_rb_alloc(ep, CA_RB_ITEMS * (CA_LINK_LAYER_SIZE+2));
+	rc = ca_rb_alloc(ep, CA_RB_ITEMS * CA_LINK_LAYER_SIZE);
 	if (rc)
 		return rc;
 	rc = ca_intr_allocate(ep); /* pkt-in and msg-in buffers */
@@ -135,8 +135,6 @@ static int ca_intr_bulk_init(struct ca_device *ca_dev)
 
 	return rc;
 }
-
-/* -- */
 
 /*
  * Kernel thread which monitors CAM changes.
@@ -290,15 +288,15 @@ static int rb_read_tpdu(struct wintv_ci_dev *wintvci)	// CAM INTR_IN --> ringbuf
 	u8 slot = 0; /* read from slot 0 */
 	u8 tcid = 0; /* get from received TPDU */
 
-	//pr_info("%20s : %d\n", __func__, CA_TPDU_MAX_SIZE);
+	//pr_info("%20s : %d\n", __func__, CA_CTRL_MAXTPDU);
 
-	buf = ci_kmalloc(CA_TPDU_MAX_SIZE, 0, (char *)__func__);
+	buf = ci_kmalloc(CA_CTRL_MAXTPDU, 0, (char *)__func__);
 	if (!buf)
 		return -1;
 
-	size = CA_recv_TPDU(wintvci, slot, &tcid, buf+2, CA_TPDU_MAX_SIZE-2);
+	size = CA_recv_TPDU(wintvci, slot, &tcid, buf+2, CA_CTRL_MAXTPDU - 2);
 
-	if (size <= 00) {
+	if (size <= 0) {
 		pr_err("%20s : FAILED\n", __func__);
 		goto error;
 	}
@@ -367,7 +365,6 @@ static int ca_poll_tpdu(struct wintv_ci_dev *wintvci)
 
 /* --- H O S T --> C A M --- */
 
-#define LPDU_MAX_FRAG_SIZE (CA_LINK_LAYER_SIZE-2)
 /*
  * -- send one full TPDU -- wait for STATUSBIT_FR --
  *
@@ -395,7 +392,7 @@ static ssize_t CA_send_TPDU(struct wintv_ci_dev *wintvci, u8 slot, u8 tcid,
 		    [1] = more(0x80) | last(0x0)
 		    [2..n] = TPDU-fragment
 		*/
-		size_t frag_size = MIN(todo, LPDU_MAX_FRAG_SIZE);
+		size_t frag_size = MIN(todo, CA_LINK_LAYER_DATA);
 
 		tpdu_frag[1] = (frag_size < todo) ? 0x80 : 0x00;
 		memcpy(tpdu_frag+2, buf+ofs, frag_size);
@@ -533,8 +530,6 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg) {
 			goto out_unlock;
 		}
 		info->type  = CA_CI_LINK;
-		//info->flags = CA_CI_MODULE_PRESENT;
-		//info->flags = CA_CI_MODULE_READY;
 		info->flags = wintvci->slot.cam_state;
 
 		if (info->flags != CA_CI_MODULE_READY)
