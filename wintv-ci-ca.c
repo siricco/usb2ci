@@ -147,20 +147,19 @@ static int ca_thread(void *data)
 //	pr_info("%s starting\n", __func__);
 
 	/* choose the initial delay */
-	ca_dev->delay = HZ; /* 1 sec */
+	ca_dev->ca_task.delay = HZ; /* 1 sec */
 
 	/* main loop */
 	while (!kthread_should_stop()) {
-		/* sleep for a bit */
-		if (!ca_dev->wakeup) {
+		/* sleep if not woken up */
+		if (!ca_dev->ca_task.wakeup) {
 			set_current_state(TASK_INTERRUPTIBLE);
-			schedule_timeout(ca_dev->delay);
+			schedule_timeout(ca_dev->ca_task.delay);
 			if (kthread_should_stop())
 				return 0;
 		}
-		ca_dev->wakeup = 0;
 
-		//pr_info("%s working\n", __func__);
+		ca_dev->ca_task.wakeup = 0;
 		cam_state_monitor(ca_dev->wintvci);
 	}
 
@@ -169,7 +168,7 @@ static int ca_thread(void *data)
 
 /* --- T P D U --- */
 
-static int ca_wait_for_status(struct wintv_ci_dev *wintvci, u8 mask,
+static int ca_wait_for_status(struct ca_device *ca_dev, u8 mask,
 					u8 *pstatus, unsigned int timeout_ms)
 {
 	unsigned long start, timeout;
@@ -181,7 +180,7 @@ static int ca_wait_for_status(struct wintv_ci_dev *wintvci, u8 mask,
 	start	= jiffies;
 	timeout	= start + msecs_to_jiffies(timeout_ms);
 	do {
-		rc = CI_50_GetStatus(wintvci, pstatus);
+		rc = CI_50_GetStatus(ca_dev->wintvci, pstatus);
 		if (rc)
 			return rc;
 
@@ -216,7 +215,7 @@ static int ca_wait_for_status(struct wintv_ci_dev *wintvci, u8 mask,
  * is received -> no need to re-check the status
  */
 
-static ssize_t CA_recv_TPDU(struct wintv_ci_dev *wintvci, u8 slot, u8 *msg_tcid,
+static ssize_t CA_recv_TPDU(struct ca_device *ca_dev, u8 slot, u8 *msg_tcid,
 				char *buf, size_t bufsize)
 {
 	/* param slot is ignored -> we have only 1 slot */
@@ -238,7 +237,7 @@ static ssize_t CA_recv_TPDU(struct wintv_ci_dev *wintvci, u8 slot, u8 *msg_tcid,
 		    [1] = more(0x80) | last(0x0)
 		    [2..n] = TPDU-fragment
 		*/
-		if (CI_80_ReadLPDU(wintvci, reply))
+		if (CI_80_ReadLPDU(ca_dev->wintvci, reply))
 			/* if (rc == 0x10) */
 			goto error;
 
@@ -276,9 +275,9 @@ error:
 	return 0;
 }
 
-static int rb_read_tpdu(struct wintv_ci_dev *wintvci)	// CAM INTR_IN --> ringbuffer
+static int rb_read_tpdu(struct ca_device *ca_dev)	// CAM INTR_IN --> ringbuffer
 {
-	struct ep_info *ep_in		= &wintvci->ca_dev.ep_intr_in;
+	struct ep_info *ep_in		= &ca_dev->ep_intr_in;
 	struct dvb_ringbuffer *rb	= &ep_in->erb.buffer;
 	size_t rb_free			= dvb_ringbuffer_free(rb);
 
@@ -294,7 +293,7 @@ static int rb_read_tpdu(struct wintv_ci_dev *wintvci)	// CAM INTR_IN --> ringbuf
 	if (!buf)
 		return -1;
 
-	size = CA_recv_TPDU(wintvci, slot, &tcid, buf+2, CA_CTRL_MAXTPDU - 2);
+	size = CA_recv_TPDU(ca_dev, slot, &tcid, buf+2, CA_CTRL_MAXTPDU - 2);
 
 	if (size <= 0) {
 		pr_err("%20s : FAILED\n", __func__);
@@ -334,28 +333,28 @@ error:
 
 #define TMO_STATUS_MS 500 /* ms */
 
-static int ca_poll_tpdu(struct wintv_ci_dev *wintvci)
+static int ca_poll_tpdu(struct ca_device *ca_dev)
 {
 	unsigned char status;
 	int rc;
 
-	if (mutex_lock_interruptible(&wintvci->slot.cam_mutex))
+	if (mutex_lock_interruptible(&ca_dev->ca_mutex))
 		return -ERESTARTSYS;
 
 	/* wait for FR, on DA fetch incoming TPDUs */
 	do {
-		rc = ca_wait_for_status(wintvci, STATUSBIT_DA | STATUSBIT_FR,
+		rc = ca_wait_for_status(ca_dev, STATUSBIT_DA | STATUSBIT_FR,
 						&status, TMO_STATUS_MS);
 		if (rc)
 			break;
 		if (status & STATUSBIT_FR)
 			break;
-		rc = rb_read_tpdu(wintvci);
+		rc = rb_read_tpdu(ca_dev);
 		if (rc)
 			break;
 	} while (1);
 
-	mutex_unlock(&wintvci->slot.cam_mutex);
+	mutex_unlock(&ca_dev->ca_mutex);
 
 	if (rc)
 		pr_err("%20s : rc=0x%02X\n", __func__, rc);
@@ -373,7 +372,7 @@ static int ca_poll_tpdu(struct wintv_ci_dev *wintvci)
  * fetch incoming TPDUs before sending next fragment
  */
 
-static ssize_t CA_send_TPDU(struct wintv_ci_dev *wintvci, u8 slot, u8 tcid,
+static ssize_t CA_send_TPDU(struct ca_device *ca_dev, u8 slot, u8 tcid,
 				char *buf, size_t bufsize)
 {
 	/* param slot is ignored -> we have only 1 slot */
@@ -398,12 +397,12 @@ static ssize_t CA_send_TPDU(struct wintv_ci_dev *wintvci, u8 slot, u8 tcid,
 		memcpy(tpdu_frag+2, buf+ofs, frag_size);
 
 		/* wait for FR, fetch incoming TPDUs */
-		rc = ca_poll_tpdu(wintvci);
+		rc = ca_poll_tpdu(ca_dev);
 		if (rc)
 			goto error;
 
 		/* send LPDU */
-		rc = CI_20_WriteLPDU(wintvci, tpdu_frag, frag_size+2);
+		rc = CI_20_WriteLPDU(ca_dev->wintvci, tpdu_frag, frag_size+2);
 		if (rc) {
 			//if (rc == 0x20)
 			goto error;
@@ -420,9 +419,9 @@ error:
 	return rc;
 }
 
-static int rb_write_tpdu(struct wintv_ci_dev *wintvci)	// ringbuffer --> CAM BULK_OUT
+static int rb_write_tpdu(struct ca_device *ca_dev)	// ringbuffer --> CAM BULK_OUT
 {
-	struct ep_info *ep_out		= &wintvci->ca_dev.ep_bulk_out;
+	struct ep_info *ep_out		= &ca_dev->ep_bulk_out;
 	struct dvb_ringbuffer *rb	= &ep_out->erb.buffer;
 	int rc;
 
@@ -452,7 +451,7 @@ static int rb_write_tpdu(struct wintv_ci_dev *wintvci)	// ringbuffer --> CAM BUL
 	tcid = buf[1];
 	count -= 2;
 
-	rc = CA_send_TPDU(wintvci, slot, tcid, buf+2, count);
+	rc = CA_send_TPDU(ca_dev, slot, tcid, buf+2, count);
 	if (rc)
 		goto error;
 #ifdef DEBUG_CA_IO
@@ -462,7 +461,7 @@ static int rb_write_tpdu(struct wintv_ci_dev *wintvci)	// ringbuffer --> CAM BUL
 #ifdef DEBUG_TPDU
 	dump_io_tpdu( (u8 *)buf, count+2, __func__, 0);
 #endif
-	rc = ca_poll_tpdu(wintvci);
+	rc = ca_poll_tpdu(ca_dev);
 	if (rc)
 		goto error;
 
@@ -491,18 +490,21 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg) {
 
 	int rc = 0;
 
-	if (mutex_lock_interruptible(&ca_dev->ca_ioctl_mutex))
-		//return -ERESTARTSYS;
-		return -1;
-
 	switch (cmd) {
 	case CA_RESET:
-		mutex_lock(&wintvci->slot.cam_mutex);
-
 		pr_info("%s : %s\n", __func__, "CA_RESET");
-		cam_state_set(wintvci, USBCI_STATE_NON);
 
-		mutex_unlock(&wintvci->slot.cam_mutex);
+		if (mutex_lock_interruptible(&ca_dev->ca_ioctl_mutex))
+			//return -ERESTARTSYS;
+			return -1;
+
+		cam_state_set(wintvci, USBCI_STATE_RST);
+
+		wait_event_interruptible(
+				wintvci->slot.cam_wq,
+				wintvci->slot.usbci_state != USBCI_STATE_RST);
+
+		mutex_unlock(&ca_dev->ca_ioctl_mutex);
 		break;
 
 	case CA_GET_CAP: {
@@ -533,12 +535,12 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg) {
 		info->flags = wintvci->slot.cam_state;
 
 		if (info->flags != CA_CI_MODULE_READY)
-		    pr_info("%s : %s [%d] : CAM %s\n", __func__,
-			"CA_GET_SLOT_INFO",
-			info->num,
-			(info->flags == CA_CI_MODULE_READY) ? "READY" :
-			(info->flags == CA_CI_MODULE_PRESENT) ? "PRESENT" :
-			"NO_CAM");
+			pr_info("%s : %s [%d] : CAM %s\n", __func__,
+				"CA_GET_SLOT_INFO",
+				info->num,
+				(info->flags == CA_CI_MODULE_READY) ? "READY" :
+				(info->flags == CA_CI_MODULE_PRESENT) ? "PRESENT" :
+				"REMOVED");
 		break;
 	}
 
@@ -569,7 +571,6 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg) {
 	}
 
 out_unlock:
-	mutex_unlock(&ca_dev->ca_ioctl_mutex);
 	return rc;
 }
 
@@ -613,7 +614,7 @@ static ssize_t ca_write(struct file *file, const char __user *buf,
 			dvb_ringbuffer_free(rb));
 #endif
 	if (ep_out->erb.num_items)
-		if (rb_write_tpdu(wintvci)) /* RB --> CAM BULK_OUT */
+		if (rb_write_tpdu(ca_dev)) /* RB --> CAM BULK_OUT */
 			return -1;
 	return count;
 }
@@ -729,7 +730,7 @@ void ca_detach(struct wintv_ci_dev *wintvci)
 	pr_info("Detaching DVB CA Device\n");
 
 	/* shutdown the thread if there was one */
-	kthread_stop(ca_dev->thread);
+	kthread_stop(ca_dev->ca_task.thread);
 
 	/* de-register ca-device */
 	dvb_unregister_device(ca_dev->regdev_ca);
@@ -746,9 +747,8 @@ int ca_attach(struct wintv_ci_dev *wintvci)
 	pr_info("Attaching DVB CA Device\n");
 	ca_dev->wintvci = wintvci;
 
-	mutex_init(&ca_dev->ca_cmd_mutex);
+	mutex_init(&ca_dev->ca_mutex);
 	mutex_init(&ca_dev->ca_ioctl_mutex);
-	mutex_init(&wintvci->slot.cam_mutex);
 
 	init_waitqueue_head(&ca_dev->ep_intr_in.erb.wq);
 	init_waitqueue_head(&ca_dev->ep_bulk_out.erb.wq);
@@ -768,12 +768,12 @@ int ca_attach(struct wintv_ci_dev *wintvci)
 		goto free_ep;
 
 	/* create a kthread for monitoring this CA device */
-	ca_dev->thread = kthread_run(ca_thread, ca_dev, "kdvb-ca-%i:%i",
-				 ca_dev->regdev_ca->adapter->num,
-				 ca_dev->regdev_ca->id);
+	ca_dev->ca_task.thread = kthread_run(ca_thread, ca_dev, "kdvb-ca-%i:%i",
+					     ca_dev->regdev_ca->adapter->num,
+					     ca_dev->regdev_ca->id);
 
-	if (IS_ERR(ca_dev->thread)) {
-		rc = PTR_ERR(ca_dev->thread);
+	if (IS_ERR(ca_dev->ca_task.thread)) {
+		rc = PTR_ERR(ca_dev->ca_task.thread);
 		pr_err("%s: failed to start kernel_thread (%d)\n",
 				__func__, rc);
 		goto unregister;

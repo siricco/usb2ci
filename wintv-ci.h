@@ -78,24 +78,21 @@ struct msg_reply {
 };
 
 struct slot_info {
-	int		usbci_state;
-	unsigned long	timestamp;
+	int			usbci_state;
 
-	int		cis_valid;
-	u32		config_base;
-	u8		config_option;
-	int		link_layer_size;
+	int			cis_valid;
+	u32			config_base;
+	u8			config_option;
+	int			link_layer_size;
 
-	struct mutex	cam_mutex;
-	int		cam_state;
-	int		cam_state_previous;
-	int		cam_change;
+	int			cam_state;
+	wait_queue_head_t	cam_wq;
 };
 
 struct urb_transfer {
-	struct urb 	*urb;
-	unsigned char	*xfer_buffer;
-	dma_addr_t	dma_addr;
+	struct urb 		*urb;
+	unsigned char		*xfer_buffer;
+	dma_addr_t		dma_addr;
 };
 
 struct isoc_info {
@@ -166,25 +163,26 @@ struct ep_info {
 	struct ep_ringbuffer	erb;
 };
 
-struct ca_device {
-	struct wintv_ci_dev	*wintvci;
-
-	struct dvb_device 	*regdev_ca;
-	struct mutex		ca_cmd_mutex;
-	struct mutex		ca_ioctl_mutex;
-
-	wait_queue_head_t	ca_wait_queue_in;
-	wait_queue_head_t	ca_wait_queue_out;
-
-	struct ep_info		ep_intr_in;  /* interrupt */
-	struct ep_info		ep_bulk_out; /* bulk */
-
+struct task {
 	/* PID of the monitoring thread */
 	struct task_struct	*thread;
 	/* Flag indicating the thread should wake up now */
 	unsigned int		wakeup:1;
 	/* Delay the main thread should use */
 	unsigned long		delay;
+};
+
+struct ca_device {
+	struct wintv_ci_dev	*wintvci;
+
+	struct dvb_device 	*regdev_ca;
+	struct mutex		ca_mutex;
+	struct mutex		ca_ioctl_mutex;
+
+	struct ep_info		ep_intr_in;  /* interrupt */
+	struct ep_info		ep_bulk_out; /* bulk */
+
+	struct task		ca_task;
 
 	int		ca_poll_cnt;
 	unsigned int	ca_last_poll_state;
@@ -233,13 +231,13 @@ struct wintv_ci_dev {
 	struct ca_device		ca_dev; /* TPDU exchange (EN 50221)  */
 	struct ci_device		ci_dev; /* TS-streaming */
 
-	struct slot_info slot;
+	struct slot_info	slot;
 
 	u8 ep0_buffer[USB_EP0_SIZE];
 
 	/* logs */
-	u8 last_status;
-	int last_status_cnt;
+	u8			last_status;
+	int			last_status_cnt;
 
 	/* DVB */
 	struct dvb_adapter	adapter;
@@ -254,18 +252,19 @@ int CI_80_ReadLPDU (struct wintv_ci_dev *wintvci, struct msg_reply *reply);
 
 void *ci_kmalloc(int size, int zero, char * caller);
 
-/* CAM status */
+/* internal CAM status */
 enum {
 	USBCI_STATE_NON = 1,
-	USBCI_STATE_CON,
+	USBCI_STATE_CAM,
 	USBCI_STATE_RST,
 	USBCI_STATE_CIS,
 	USBCI_STATE_COR,
+	USBCI_STATE_LNK,
 	USBCI_STATE_RDY
 };
+
 int cam_state_monitor(struct wintv_ci_dev *wintvci);
 int cam_state_set(struct wintv_ci_dev *wintvci, int usbci_state);
-
 
 /*
  * --- P C M C I A - C I S ---

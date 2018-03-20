@@ -188,13 +188,13 @@ struct ci_cmd_info {
 
 static struct ci_cmd_info CI_CMD_INFO[] = {
 	{ "CI_00_undef", 0,0 },
-	{ "CI_10_HW_RESET",	0,		 USBCI_STATE_RST },
+	{ "CI_10_HW_RESET",	0,		 USBCI_STATE_CIS },
 	{ "CI_20_LPDU_WRITE",	USBCI_STATE_RDY, 0 },
 	{ "CI_30_undef", 0,0 },
-	{ "CI_40_GET_CIS",	USBCI_STATE_RST, USBCI_STATE_CIS },
-	{ "CI_50_STATUS",	USBCI_STATE_RDY, 0 },
-	{ "CI_60_NEGOTIATE",	USBCI_STATE_COR, USBCI_STATE_RDY },
-	{ "CI_70_WRITE_COR",	USBCI_STATE_CIS, USBCI_STATE_COR },
+	{ "CI_40_GET_CIS",	USBCI_STATE_CIS, USBCI_STATE_COR },
+	{ "CI_50_STATUS",	USBCI_STATE_RDY, 0 }, /* timeout if no link */
+	{ "CI_60_NEGOTIATE",	USBCI_STATE_LNK, USBCI_STATE_RDY },
+	{ "CI_70_WRITE_COR",	USBCI_STATE_COR, USBCI_STATE_LNK },
 	{ "CI_80_LPDU_READ",	USBCI_STATE_RDY, 0 },
 	{ "CI_90_GET_VER",	0,		 0 }
 };
@@ -341,7 +341,6 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 //static 
 int cam_state_set(struct wintv_ci_dev *wintvci, int usbci_state)
 {
-	wintvci->slot.timestamp = jiffies;
 	if (!usbci_state || (wintvci->slot.usbci_state == usbci_state))
 		return 0;
 
@@ -351,15 +350,16 @@ int cam_state_set(struct wintv_ci_dev *wintvci, int usbci_state)
 	wintvci->slot.usbci_state = usbci_state;
 	switch(usbci_state) {
 	case USBCI_STATE_NON:
-	case USBCI_STATE_CON:
 	default:
 		wintvci->slot.cam_state  = 0;
 		wintvci->last_status     = 0;
 		wintvci->last_status_cnt = 0;
 		break;
+	case USBCI_STATE_CAM:
 	case USBCI_STATE_RST:
 	case USBCI_STATE_CIS:
 	case USBCI_STATE_COR:
+	case USBCI_STATE_LNK:
 		wintvci->slot.cam_state = CA_CI_MODULE_PRESENT;
 		break;
 	case USBCI_STATE_RDY:
@@ -383,7 +383,7 @@ static int CI_WriteExchange(struct wintv_ci_dev *wintvci, u8 CI_CMD,
 	int debug_mask, debug;
 	int curr_state, rc;
 
-	if (mutex_lock_interruptible(&wintvci->ca_dev.ca_cmd_mutex))
+	if (mutex_lock_interruptible(&wintvci->usb_mutex))
 		return -ERESTARTSYS;
 
 	curr_state = wintvci->slot.usbci_state;
@@ -420,9 +420,10 @@ done:
 		if (cinfo->to_state)
 			cam_state_set(wintvci, cinfo->to_state); /* set new cam-state */
 	}
-	else if (rc != CI_ERR_90_CMD_INV) cam_state_set(wintvci, USBCI_STATE_NON);
+	else if (rc != CI_ERR_90_CMD_INV)
+		cam_state_set(wintvci, USBCI_STATE_NON);
 
-	mutex_unlock(&wintvci->ca_dev.ca_cmd_mutex);
+	mutex_unlock(&wintvci->usb_mutex);
 
 	return rc;
 }
@@ -530,31 +531,32 @@ int cam_state_monitor(struct wintv_ci_dev *wintvci)
 {
 	unsigned short link_size;
 	unsigned char status;
+	int wakeup = (wintvci->slot.usbci_state == USBCI_STATE_RST);
 	int rc = 0;
 
 	//pr_info(">>> %s\n",__func__);
 	switch(wintvci->slot.usbci_state) {
 	case USBCI_STATE_NON:
-	case USBCI_STATE_CON:
+	case USBCI_STATE_CAM:
+	case USBCI_STATE_RST:
 		rc = CI_10_HwReset(wintvci);
 		if (rc)
 			break;
-		/*****/
 		ci_reset(wintvci);
 
-	case USBCI_STATE_RST:
+	case USBCI_STATE_CIS:
 		rc = CI_40_GetCIS(wintvci);
 		if (rc)
 			break;
 
-	case USBCI_STATE_CIS:
+	case USBCI_STATE_COR:
 		rc = CI_70_WriteCOR(wintvci,
 					wintvci->slot.config_base,
 					wintvci->slot.config_option);
 		if (rc)
 			break;
 
-	case USBCI_STATE_COR:
+	case USBCI_STATE_LNK:
 		link_size = CA_LINK_LAYER_SIZE;
 		// link_size = 0xffff; /* returns a max. link-layer size of 0x400 (1024.) bytes */
 		rc = CI_60_Negotiate(wintvci, &link_size);
@@ -563,10 +565,15 @@ int cam_state_monitor(struct wintv_ci_dev *wintvci)
 
 	case USBCI_STATE_RDY:
 		rc = CI_50_GetStatus(wintvci, &status);
-		if (rc)
-			break;
+		break;
+
+	default:
+		cam_state_set(wintvci, USBCI_STATE_NON);
+		break;
 	}
-	//pr_info("<<< %s\n",__func__);
+
+	if (wakeup)
+		wake_up_interruptible(&wintvci->slot.cam_wq);
 	return rc;
 }
 
@@ -1029,8 +1036,11 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 	if (wintvci->fw_state == FW_STATE_WARM ) {
 
 		rc = wintv_usb_ci_setup_endpoints(wintvci);
+
 		wintvci->slot.cis_valid = 0;
+		wintvci->slot.usbci_state = 0;
 		wintvci->slot.cam_state = 0;
+		init_waitqueue_head(&wintvci->slot.cam_wq);
 		mutex_init(&wintvci->usb_mutex);
 
 		rc = wintv_usb_ci_adapter_attach(wintvci);
