@@ -39,10 +39,8 @@
 #define ISOC_NUM_TRANSFER	8
 #define ISOC_NUM_UFRAMES	120
 
-#define TS_COUNT_TIMEOUT (HZ * 5) /* secs */
-
 /* a lot of TS in/out massages */
-//#define DEBUG_TS_IO
+#define DEBUG_TS_IO 0
 
 /* --- R I N G B U F F E R --- */
 
@@ -366,7 +364,6 @@ void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 	}
 	if (num_uframes) {
 		ci_dev->isoc_bytes_CAM	-= act_size;
-		ci_dev->CAM_tot_in	+= act_size/TS_PACKET_SIZE;
 
 		if (ci_dev->isoc_bytes_CAM < 0) {
 			pr_err("%s :  paket-count underrun (%d)\n",
@@ -375,7 +372,7 @@ void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 						b, act_size, 1);
 			ci_dev->isoc_bytes_CAM = 0;
 		}
-#ifdef DEBUG_TS_IO
+#if DEBUG_TS_IO
 		pr_info("%s : --- %d x TS, %2d uframes - rb-avail(%d) CAM(%d) TOT(%d) sframe %d\n",
 				__func__, act_size / TS_PACKET_SIZE, num_uframes,
 				dvb_ringbuffer_avail(rb)/TS_PACKET_SIZE,
@@ -386,7 +383,7 @@ void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 	}
 	ci_dev->isoc_urbs_running--;
 	wake_up_interruptible(&ci_dev->isoc_urbs_wq); /* urb waitqueue */
-#ifdef DEBUG_TS_IO
+#if DEBUG_TS_IO
 	pr_info("%s : urb submission #%d suspended, sframe %d\n",
 			__func__, ci_dev->isoc_urbs_running, urb->start_frame);
 #endif
@@ -400,7 +397,7 @@ void ts_write_CAM_complete(struct urb *urb)
 
 	ci_dev->isoc_urbs_running--;
 	wake_up_interruptible(&ci_dev->isoc_urbs_wq); /* urb waitqueue */
-#ifdef DEBUG_TS_IO
+#if DEBUG_TS_IO
 	if (!ci_dev->isoc_urbs_running) // last urb
 		pr_info("%s : ISOC write end - sframe %d\n", __func__, urb->start_frame);
 #endif
@@ -449,7 +446,7 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	int num_uframes;
 
 	size_t rb_avail			= dvb_ringbuffer_avail(&ep_out->erb.buffer);
-	size_t left			= min(frame_bufsize, (int)rb_avail);
+	size_t left			= MIN(frame_bufsize, (int)rb_avail);
 	int cf, nf, ff = 0;
 	int rc, more = 0;
 
@@ -463,20 +460,19 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	left -= left % TS_MIN_UF(uframe_size);
 	if (!left)
 		return 0;
-	
+
 	/* we have enough TS-data */
 	urb_out		= ep_out->u.isoc.transfers[urb_index].urb;
 	urb_in		= ep_in->u.isoc.transfers[urb_index].urb;
 	num_uframes	= left / uframe_size;
 
-	dvb_ringbuffer_read(&ep_out->erb.buffer, urb_out->transfer_buffer, left);
-	more = ((rb_avail - left) >= TS_MIN_UF(uframe_size)); /* we can handele more urbs */
-	ci_dev->isoc_bytes_CAM		+= left;
-	ci_dev->CAM_tot_out		+= left/TS_PACKET_SIZE;
-
 	/* usb_submit_urb resets all .status and .actual_length fields */
 	urb_out->number_of_packets = num_uframes;
 	urb_in->number_of_packets = num_uframes;
+	dvb_ringbuffer_read(&ep_out->erb.buffer, urb_out->transfer_buffer, left);
+
+	more = ((rb_avail - left) >= TS_MIN_UF(uframe_size)); /* we can handele more urbs */
+	ci_dev->isoc_bytes_CAM += left;
 
 	/* +++IMPORTANT++ start at SOF - currently no other way to set a start-frame */
 	cf = usb_get_current_frame_number(ci_dev->wintvci->udev);
@@ -502,17 +498,15 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	if (urb_out->start_frame != urb_in->start_frame)
 		pr_warn("\n\n%s : diff. start_frames: out/in: %d/%d\n\n",
 				__func__, urb_out->start_frame, urb_in->start_frame);
-#ifdef DEBUG_TS_IO
+#if DEBUG_TS_IO
 	pr_info("%s : --- %d x TS, %2d uframes - rb-avail(%d) CAM(%d) TOT(%d) if:%d\n",
 				__func__, left / TS_PACKET_SIZE,
 				num_uframes, rb_avail/TS_PACKET_SIZE,
 				ci_dev->isoc_bytes_CAM/TS_PACKET_SIZE,
 				ci_dev->CAM_tot_out, ff);
 #endif
-	return (more) ? num_uframes : 0;
+	return more;
 }
-
-/* --- */
 
 #define RB_READ_CONDITION(ep)  (dvb_ringbuffer_avail(&ep->erb.buffer) >= TS_PACKET_SIZE)
 #define RB_WRITE_CONDITION(ep) (dvb_ringbuffer_free(&ep->erb.buffer) >= TS_PACKET_SIZE)
@@ -520,10 +514,9 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 /* Host --> TS-OUT ringbuffer */
 static void ts_CAM_exchange(struct ci_device *ci_dev)
 {
-#define URB_DELAY 5000
 	struct ep_info *ep_out	= &ci_dev->ep_isoc_out;
 	struct isoc_info *isoc	= &ep_out->u.isoc;
-	int i, more_after_uframes;
+	int i, more;
 
 	if (ci_dev->isoc_urbs_running)
 		if (wait_event_interruptible(
@@ -532,11 +525,12 @@ static void ts_CAM_exchange(struct ci_device *ci_dev)
 			return;
 
 	/* short delay before submitting first urb */
+#define URB_DELAY 5000
 	usleep_range(URB_DELAY, URB_DELAY+1);
 
 	for (i = 0; i < isoc->num_transfers; i++) {
-		more_after_uframes = ts_write_CAM(ci_dev, i);
-		if (!more_after_uframes)
+		more = ts_write_CAM(ci_dev, i);
+		if (!more)
 			break;
 	}
 }
@@ -576,6 +570,7 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 		}
 	}
 
+#define TS_COUNT_TIMEOUT (HZ * 5) /* secs */
 	timer_now = jiffies;
 	ci_dev->ts_count_interval += written;
 
@@ -590,7 +585,7 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 	}
 
 	ci_dev->isoc_bytes_RB += written; /* ringbuffer write-read diff. */
-#ifdef DEBUG_TS_IO
+#if DEBUG_TS_IO
 	pr_info("     *** TS-write{%02X} (%d)[%d]<%d> - rb(%d)\n", (u8) buf[0], count,
 					todo, todo/TS_PACKET_SIZE, ci_dev->isoc_bytes_RB/TS_PACKET_SIZE);
 #endif
@@ -639,7 +634,7 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 		}
 
 		ci_dev->isoc_bytes_RB -= read; /* ringbuffer read-write diff */
-#ifdef DEBUG_TS_IO
+#if DEBUG_TS_IO
 		pr_info("     *** TS-read{%02X} (%d)[%d]<%d> - rb(%d)\n", (u8) buf[0], count,
 					read, read/TS_PACKET_SIZE, ci_dev->isoc_bytes_RB/TS_PACKET_SIZE);
 #endif
@@ -648,7 +643,6 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 }
 
 #define PR_MASK_POLL 0x7F /* dont show all calls */
-//#define PR_MASK_POLL 0x0 /* dont show all calls */
 
 static unsigned int ts_poll(struct file *file, poll_table *wait)
 {
@@ -663,17 +657,17 @@ static unsigned int ts_poll(struct file *file, poll_table *wait)
 
 //	pr_info("%s\n",__func__);
 #if 0
-	size_t rb_avail			= dvb_ringbuffer_avail(&ep_in->erb.buffer);
+	int pollin = RB_READ_CONDITION(ep_in);
 	/* only if not in nonblocking mode */
-	if (!rb_avail && ((file->f_flags & O_NONBLOCK) == 0)) {
+	if (!pollin && ((file->f_flags & O_NONBLOCK) == 0)) {
 		/* wait for data thru ts_write */
 		if (wait_event_interruptible(
 					ep_in->erb.wq,
 					RB_READ_CONDITION(ep_in)) < 0)
 			return 0;
-		rb_avail = dvb_ringbuffer_avail(&ep_in->erb.buffer);
+		pollin = true;
 	}
-	if (rb_avail)
+	if (pollin)
 		mask |= POLLIN;
 #else
 	poll_wait(file, &ep_in->erb.wq, wait);

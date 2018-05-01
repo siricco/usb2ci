@@ -208,12 +208,9 @@ struct ci_device {
 	int		ts_count_interval;
 	unsigned long	ts_count_timeout;
 
-	 /* packets write/read */
+	/* packets write/read */
 	int		isoc_bytes_RB;
 	int		isoc_bytes_CAM;
-
-	int		CAM_tot_in;
-	int		CAM_tot_out;
 };
 
 #define FW_STATE_COLD  1 /* no firmware loaded */

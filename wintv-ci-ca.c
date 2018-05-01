@@ -28,10 +28,10 @@
 #include "wintv-ci.h"
 
 /* show some TPDU massages */
-#define DEBUG_TPDU
+#define DEBUG_TPDU 1
 
 /* a lot of CA in/out massages */
-//#define DEBUG_CA_IO
+#define DEBUG_CA_IO 0
 
 /* --- R I N G B U F F E R --- */
 
@@ -293,7 +293,7 @@ static int rb_read_tpdu(struct ca_device *ca_dev)	// CAM INTR_IN --> ringbuffer
 	if (!buf)
 		return -1;
 
-	size = CA_recv_TPDU(ca_dev, slot, &tcid, buf+2, CA_CTRL_MAXTPDU - 2);
+	size = CA_recv_TPDU(ca_dev, slot, &tcid, buf+2, CA_CTRL_MAXTPDU-2);
 
 	if (size <= 0) {
 		pr_err("%20s : FAILED\n", __func__);
@@ -316,12 +316,12 @@ static int rb_read_tpdu(struct ca_device *ca_dev)	// CAM INTR_IN --> ringbuffer
 	dvb_ringbuffer_write(rb, buf, size);
 	ep_in->erb.num_items++;
 	wake_up_interruptible(&ep_in->erb.wq); /* ep-in waitqueue */
-#ifdef DEBUG_CA_IO
+#if DEBUG_CA_IO
 	pr_info("%20s : msg[%d] %5d bytes - rb-free(%d)\n",
 				__func__, ep_in->erb.num_items, size,
 				dvb_ringbuffer_free(rb));
 #endif
-#ifdef DEBUG_TPDU
+#if DEBUG_TPDU
 	dump_io_tpdu((u8 *)buf, size, __func__, 1);
 #endif
 	kfree(buf);
@@ -372,14 +372,14 @@ static int ca_poll_tpdu(struct ca_device *ca_dev)
  * fetch incoming TPDUs before sending next fragment
  */
 
-static ssize_t CA_send_TPDU(struct ca_device *ca_dev, u8 slot, u8 tcid,
-				char *buf, size_t bufsize)
+static int CA_send_TPDU(struct ca_device *ca_dev, u8 slot, u8 tcid,
+				char *buf, size_t len)
 {
 	/* param slot is ignored -> we have only 1 slot */
 	char tpdu_frag[CA_LINK_LAYER_SIZE];
 
 	size_t ofs = 0;
-	size_t todo = bufsize;
+	size_t todo = len;
 	int rc;
 
 	/* setup LPDU-header */
@@ -414,62 +414,9 @@ static ssize_t CA_send_TPDU(struct ca_device *ca_dev, u8 slot, u8 tcid,
 	return 0;
 error:
 	pr_err("%20s : *** FAILED[%d] *** (%d of %d bytes transmitted)\n",
-		__func__, rc, ofs, bufsize);
+		__func__, rc, ofs, len);
 
 	return rc;
-}
-
-static int rb_write_tpdu(struct ca_device *ca_dev)	// ringbuffer --> CAM BULK_OUT
-{
-	struct ep_info *ep_out		= &ca_dev->ep_bulk_out;
-	struct dvb_ringbuffer *rb	= &ep_out->erb.buffer;
-	int rc;
-
-	u8 slot, tcid;
-	size_t count;
-	u8 *buf;
-
-	if (!ep_out->erb.num_items)
-		return 0;
-
-	count  = DVB_RINGBUFFER_PEEK(rb,0) << 8;
-	count |= DVB_RINGBUFFER_PEEK(rb,1);
-
-	buf = ci_kmalloc(count, 0, (char *)__func__);
-	if (!buf)
-		return -1;
-
-	//pr_info("%20s : %d\n", __func__, count);
-
-	DVB_RINGBUFFER_SKIP(rb, 2);
-	dvb_ringbuffer_read(rb, buf, count);
-	ep_out->erb.num_items--;
-	wake_up_interruptible(&ep_out->erb.wq); /* ep-out waitqueue */
-
-	/* read header */
-	slot = buf[0];
-	tcid = buf[1];
-	count -= 2;
-
-	rc = CA_send_TPDU(ca_dev, slot, tcid, buf+2, count);
-	if (rc)
-		goto error;
-#ifdef DEBUG_CA_IO
-	pr_info("%20s : msg[%d] %5d bytes\n",
-				__func__, ep_out->erb.num_items+1, count);
-#endif
-#ifdef DEBUG_TPDU
-	dump_io_tpdu( (u8 *)buf, count+2, __func__, 0);
-#endif
-	rc = ca_poll_tpdu(ca_dev);
-	if (rc)
-		goto error;
-
-	kfree(buf);
-	return 0;
-error:
-	kfree(buf);
-	return -1;
 }
 
 /*
@@ -482,13 +429,11 @@ error:
 #define CA_SET_DESCR      _IOW('o', 134, ca_descr_t)
 */
 
-static int ca_ioctl(struct file *file, unsigned int cmd, void *parg) {
-
+static int ca_ioctl(struct file *file, unsigned int cmd, void *parg)
+{
 	struct dvb_device *dvbdev = file->private_data;
 	struct wintv_ci_dev *wintvci = dvbdev->priv;
 	struct ca_device *ca_dev = &wintvci->ca_dev;
-
-	int rc = 0;
 
 	switch (cmd) {
 	case CA_RESET:
@@ -527,10 +472,10 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg) {
 	case CA_GET_SLOT_INFO: {
 		struct ca_slot_info *info = parg;
 
-		if (info->num != 0) { /* we have only 1 slot */
-			rc = -EINVAL;
-			goto out_unlock;
-		}
+		if (info->num != 0) /* we have only 1 slot */
+			//return -EINVAL;
+			return -1;
+
 		info->type  = CA_CI_LINK;
 		info->flags = wintvci->slot.cam_state;
 
@@ -566,12 +511,11 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg) {
 		break;
 
 	default:
-		rc = -EINVAL;
-		break;
+		//return -EINVAL;
+		return -1;
 	}
 
-out_unlock:
-	return rc;
+	return 0;
 }
 
 #define CA_READ_CONDITION(ep)  (ep->erb.num_items > 0)
@@ -590,33 +534,41 @@ static ssize_t ca_write(struct file *file, const char __user *buf,
 	struct wintv_ci_dev *wintvci	= dvbdev->priv;
 	struct ca_device *ca_dev	= &wintvci->ca_dev;
 
-	struct ep_info *ep_out		= &ca_dev->ep_bulk_out;
-	struct dvb_ringbuffer *rb	= &ep_out->erb.buffer;
-
-	int rb_free			= dvb_ringbuffer_free(rb);
+	int rc;
+	u8 slot, tcid;
+	u8 *msg;
 
 	//pr_info("%s: %d\n", __func__, count);
+	if (count <= 0)
+		return 0;
 
-	if (rb_free >= (count + 2)) {
-		DVB_RINGBUFFER_WRITE_BYTE(rb, count >> 8);
-		DVB_RINGBUFFER_WRITE_BYTE(rb, count & 0xff);
-		dvb_ringbuffer_write_user(rb, buf, count);
-		ep_out->erb.num_items++;
-	}
-	else {
-		pr_err("%20s : msg[%d] too large - count/free %d/%d\n",
-			__func__, ep_out->erb.num_items, count, rb_free);
-		count = 0;
-	}
-#ifdef DEBUG_CA_IO
-	pr_info("%20s : msg[%d] size %5d - rb-free(%d)\n",
-			__func__, ep_out->erb.num_items-1, count,
-			dvb_ringbuffer_free(rb));
+	msg = ci_kmalloc(count, 0, (char *)__func__);
+	if (!msg)
+		return -1;
+
+	rc = copy_from_user(msg, buf, count);
+	if (rc)
+		goto done;
+
+	/* read header */
+	slot = msg[0];
+	tcid = msg[1];
+
+#if DEBUG_CA_IO
+	pr_info("%20s : %d:%d size %5d\n", __func__, slot, tcid, count-2);
 #endif
-	if (ep_out->erb.num_items)
-		if (rb_write_tpdu(ca_dev)) /* RB --> CAM BULK_OUT */
-			return -1;
-	return count;
+#if DEBUG_TPDU
+	dump_io_tpdu(msg, count, __func__, 0);
+#endif
+
+	rc = CA_send_TPDU(ca_dev, slot, tcid, msg+2, count-2); /* MSG --> CAM BULK_OUT */
+	if (rc)
+		goto done;
+
+	rc = ca_poll_tpdu(ca_dev);
+done:
+	kfree(msg);
+	return (rc) ? -1 : count;
 }
 
 static ssize_t ca_read( struct file *file, char __user *buf,
@@ -653,7 +605,7 @@ static ssize_t ca_read( struct file *file, char __user *buf,
 		DVB_RINGBUFFER_SKIP(rb, size);
 		size = 0;
 	}
-#ifdef DEBUG_CA_IO
+#if DEBUG_CA_IO
 	pr_info("%20s : msg[%d] size %5d - rb-free(%d)\n",
 			__func__, ep_in->erb.num_items, size,
 			dvb_ringbuffer_free(rb));
@@ -669,19 +621,15 @@ static unsigned int ca_poll(struct file *file, poll_table *wait)
 	struct ca_device *ca_dev	= &wintvci->ca_dev;
 
 	struct ep_info *ep_in		= &ca_dev->ep_intr_in;
-	struct ep_info *ep_out		= &ca_dev->ep_bulk_out;
 
-	unsigned int mask = 0;
+	unsigned int mask = POLLOUT | POLLWRNORM;
 
 	//pr_info("%s:\n", __func__);
 
 	poll_wait(file, &ep_in->erb.wq, wait);	/* CAM -> RB */
-	poll_wait(file, &ep_out->erb.wq, wait);	/* RB -> CAM */
 
 	if (CA_READ_CONDITION(ep_in)) 
 		mask |= POLLIN | POLLRDNORM;
-	if (CA_WRITE_CONDITION(ep_out))
-		mask |= POLLOUT | POLLWRNORM;
 
 	/* DEBUG */
 	if ((ca_dev->ca_poll_cnt & PR_POLL_CNT) == 0) {
@@ -751,7 +699,6 @@ int ca_attach(struct wintv_ci_dev *wintvci)
 	mutex_init(&ca_dev->ca_ioctl_mutex);
 
 	init_waitqueue_head(&ca_dev->ep_intr_in.erb.wq);
-	init_waitqueue_head(&ca_dev->ep_bulk_out.erb.wq);
 
 	ca_dev->ca_poll_cnt = 0;
 	ca_dev->ca_last_poll_state = 0;

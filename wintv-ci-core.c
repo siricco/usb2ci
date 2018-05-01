@@ -69,8 +69,8 @@ static struct usb_id_info usb2_ci_info = {
 
 /* FX vendor request for accessing RAM/ROM */
 #define VR_A0_INTRAM 0xA0 /* handled internal by CPU */
-#define VR_A2_EEPROM 0xA2 /* handled code-bulker firmware only */
-#define VR_A3_EXTRAM 0xA3 /* handled code-bulker firmware only */
+#define VR_A2_EEPROM 0xA2 /* handled with code-bulker firmware only */
+#define VR_A3_EXTRAM 0xA3 /* handled with code-bulker firmware only */
 
 #define USB_CTL_TIMEOUT 2000
 #define USB_CMD_TIMEOUT 5000 /* 5 seconds */
@@ -520,9 +520,10 @@ int CI_80_ReadLPDU(struct wintv_ci_dev *wintvci, struct msg_reply *reply)
 	return(rc);
 }
 
-static int CI_90_GetVersion(struct wintv_ci_dev *wintvci)
+static int CI_90_GetVersion(struct wintv_ci_dev *wintvci,
+						struct msg_reply *reply)
 {
-	int rc = CI_WriteExchange(wintvci, CI_90_GET_VER, NULL, NULL, 0);
+	int rc = CI_WriteExchange(wintvci, CI_90_GET_VER, reply, NULL, 0);
 	return(rc);
 }
 
@@ -827,10 +828,10 @@ static void wintv_usb_ci_show_hw_info( struct wintv_ci_dev *wintvci )
 
 static void wintv_usb_ci_show_sw_info( struct wintv_ci_dev *wintvci )
 {
-	struct ep_info *ep = &wintvci->ca_dev.ep_intr_in;
-	char *ver = ep->u.intr.msg.buffer;
+	struct msg_reply reply;
+	unsigned char *ver = reply.buffer;
 
-	int rc = CI_90_GetVersion(wintvci);
+	int rc = CI_90_GetVersion(wintvci, &reply);
 	if (!rc) {
 	    ver[5] = 0; /* terminate fw-version string */
 	    pr_info(" * FW_Version(%s) FPGA_Version(%c.%c)\n", ver+1, ver[6], ver[7]);
@@ -946,6 +947,12 @@ static int wintv_usb_ci_adapter_attach(struct wintv_ci_dev *wintvci) {
 	int rc;
 	pr_info("Registering DVB Adapter\n");
 
+	wintvci->slot.cis_valid = 0;
+	wintvci->slot.usbci_state = 0;
+	wintvci->slot.cam_state = 0;
+	init_waitqueue_head(&wintvci->slot.cam_wq);
+	mutex_init(&wintvci->usb_mutex);
+
 	rc = dvb_register_adapter(&wintvci->adapter, "WinTV-CI", THIS_MODULE,
 				  &wintvci->udev->dev, adapter_nr);
 	return rc;
@@ -960,7 +967,6 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 {
 	struct wintv_ci_dev *wintvci;
 	char fw_name[32];
-
 	int rc = 0;
 
 	struct usb_device *udev = usb_get_dev(interface_to_usbdev(intf));
@@ -993,38 +999,36 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 
 	/* ------ COLD ------ */
 	if (wintvci->fw_state == FW_STATE_COLD) {
+		int fw_ver = hw_version;
 
-	    int fw_ver = hw_version;
+		if (hw_version > info->max_ver_hw) {
+			pr_err("Unexpected hardware version %d\n", hw_version);
+			goto error;
+		}
 
-	    if (hw_version > info->max_ver_hw) {
-		pr_err("Unexpected hardware version %d\n", hw_version);
-		goto error;
-	    }
+		if (fw_ver > info->max_ver_fw) /* for Cinergy CI USB */
+			fw_ver = info->max_ver_fw; /* same FW for versions 3 and 4 */
+		/*
+		 * First load EZUSB firmware with support of 0xA3 requests
+		 * and show some hardware-info. No automatic USB-renumbering !
+		 */
+		rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name);
+		if (!rc)
+			goto error;
+		wintvci->fw_state = FW_STATE_EZUSB;
+		/*---*/
+		wintv_usb_ci_show_hw_info(wintvci);
 
-	    if (fw_ver > info->max_ver_fw) /* for Cinergy CI USB */
-		fw_ver = info->max_ver_fw; /* same FW for versions 3 and 4 */
+		/*
+		 * Now load the matching CI-firmware - automatic USB renumbering !
+		 */
+		snprintf(fw_name, sizeof(fw_name),info->fw_ci_name, fw_ver);
+		pr_info("CI-firmware %s selected\n", fw_name);
 
-	    /*
-	     * First load EZUSB firmware with support of 0xA3 requests
-	     * and show some hardware-info. No automatic USB-renumbering !
-	     */
-	    rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name);
-	    if (!rc)
-		goto error;
-	    wintvci->fw_state = FW_STATE_EZUSB;
-	    /*---*/
-	    wintv_usb_ci_show_hw_info(wintvci);
-
-	    /*
-	     * Now load the matching CI-firmware - automatic USB renumbering !
-	     */
-	    snprintf(fw_name, sizeof(fw_name),info->fw_ci_name, fw_ver);
-	    pr_info("CI-firmware %s selected\n", fw_name);
-
-	    rc = wintv_usb_ci_load_firmware(wintvci,fw_name);
-	    if (!rc)
-		goto error;
-	    /* Now the USB-device disconnects and re-appears in warm state */
+		rc = wintv_usb_ci_load_firmware(wintvci, fw_name);
+		if (!rc)
+			goto error;
+		/* Now the USB-device disconnects and re-appears in warm state */
 	}
 
 	kref_init(&wintvci->kref);
@@ -1034,20 +1038,13 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 
 	/* ------ WARM ------ */
 	if (wintvci->fw_state == FW_STATE_WARM ) {
-
 		rc = wintv_usb_ci_setup_endpoints(wintvci);
-
-		wintvci->slot.cis_valid = 0;
-		wintvci->slot.usbci_state = 0;
-		wintvci->slot.cam_state = 0;
-		init_waitqueue_head(&wintvci->slot.cam_wq);
-		mutex_init(&wintvci->usb_mutex);
+		if (rc < 0)
+			goto error;
 
 		rc = wintv_usb_ci_adapter_attach(wintvci);
-		if (rc < 0) {
-			pr_err("***** failed(%d) *****\n",rc);
+		if (rc < 0)
 			goto error;
-		}
 
 		rc = ca_attach(wintvci);
 		if (rc)
@@ -1058,7 +1055,6 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 			goto error;
 
 		wintv_usb_ci_show_sw_info(wintvci);
-
 		cam_state_set(wintvci, USBCI_STATE_NON);
 	}
 
@@ -1067,7 +1063,7 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 error:
 	usb_put_dev(wintvci->udev);
 error1:
-	pr_err("probe failed\n");
+	pr_err("***** probe failed(%d) *****\n",rc);
 	return -ENODEV;
 }
 
