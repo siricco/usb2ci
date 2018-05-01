@@ -576,9 +576,9 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 
 	if (ci_dev->ts_count_timeout <= timer_now) {
 		int time = timer_now - ci_dev->ts_count_timeout + TS_COUNT_TIMEOUT;
-		int mbitx100 = ci_dev->ts_count_interval*HZ/time*8; /* bits in 1 sec */
+		int mbitx100 = ci_dev->ts_count_interval/time*HZ*8; /* bits/second */
 		mbitx100 /= (1000*1000/100);
-		
+
 		pr_info("     +++ TS-BITRATE : %d.%02d Mbit/s\n", mbitx100/100,mbitx100 % 100);
 		ci_dev->ts_count_timeout = timer_now + TS_COUNT_TIMEOUT;
 		ci_dev->ts_count_interval = 0;
