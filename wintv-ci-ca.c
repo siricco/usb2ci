@@ -215,7 +215,7 @@ static int ca_wait_for_status(struct ca_device *ca_dev, u8 mask,
  * is received -> no need to re-check the status
  */
 
-static ssize_t CA_recv_TPDU(struct ca_device *ca_dev, u8 slot, u8 *msg_tcid,
+static size_t CA_recv_TPDU(struct ca_device *ca_dev, u8 slot, u8 *msg_tcid,
 				char *buf, size_t bufsize)
 {
 	/* param slot is ignored -> we have only 1 slot */
@@ -229,7 +229,7 @@ static ssize_t CA_recv_TPDU(struct ca_device *ca_dev, u8 slot, u8 *msg_tcid,
 
 	reply = ci_kmalloc(sizeof *reply, 0, (char *)__func__);
 	if (!reply)
-		return -1;
+		return 0;
 
 	while (frag_more) {
 		/* read one LPDU
@@ -259,7 +259,7 @@ static ssize_t CA_recv_TPDU(struct ca_device *ca_dev, u8 slot, u8 *msg_tcid,
 		if (frag_size <= free)
 			memcpy((void *)buf+ofs, reply->buffer+2, frag_size);
 		else
-			pr_err("%s : *** ERROR *** TPDU too large (> %d)\n",
+			pr_err("%s : *** ERROR *** TPDU too large (> %zu)\n",
 							__func__, bufsize);
 		ofs += frag_size;
 		free -= frag_size;
@@ -295,7 +295,7 @@ static int rb_read_tpdu(struct ca_device *ca_dev)	// CAM INTR_IN --> ringbuffer
 
 	size = CA_recv_TPDU(ca_dev, slot, &tcid, buf+2, CA_CTRL_MAXTPDU-2);
 
-	if (size <= 0) {
+	if (!size) {
 		pr_err("%20s : FAILED\n", __func__);
 		goto error;
 	}
@@ -306,7 +306,7 @@ static int rb_read_tpdu(struct ca_device *ca_dev)	// CAM INTR_IN --> ringbuffer
 	size += 2;
 
 	if ((size + 2) > rb_free) {
-		pr_err("%20s : CA_IN overflow of %d bytes\n", __func__,
+		pr_err("%20s : CA_IN overflow of %zu bytes\n", __func__,
 						size + 2 - rb_free);
 		goto error;
 	}
@@ -317,7 +317,7 @@ static int rb_read_tpdu(struct ca_device *ca_dev)	// CAM INTR_IN --> ringbuffer
 	ep_in->erb.num_items++;
 	wake_up_interruptible(&ep_in->erb.wq); /* ep-in waitqueue */
 #if DEBUG_CA_IO
-	pr_info("%20s : msg[%d] %5d bytes - rb-free(%d)\n",
+	pr_info("%20s : msg[%d] %5zu bytes - rb-free(%zu)\n",
 				__func__, ep_in->erb.num_items, size,
 				dvb_ringbuffer_free(rb));
 #endif
@@ -413,7 +413,7 @@ static int CA_send_TPDU(struct ca_device *ca_dev, u8 slot, u8 tcid,
 	}
 	return 0;
 error:
-	pr_err("%20s : *** FAILED[%d] *** (%d of %d bytes transmitted)\n",
+	pr_err("%20s : *** FAILED[%d] *** (%zu of %zu bytes transmitted)\n",
 		__func__, rc, ofs, len);
 
 	return rc;
@@ -555,7 +555,7 @@ static ssize_t ca_write(struct file *file, const char __user *buf,
 	tcid = msg[1];
 
 #if DEBUG_CA_IO
-	pr_info("%20s : %d:%d size %5d\n", __func__, slot, tcid, count-2);
+	pr_info("%20s : %d:%d size %5zu\n", __func__, slot, tcid, count-2);
 #endif
 #if DEBUG_TPDU
 	dump_io_tpdu(msg, count, __func__, 0);
@@ -600,13 +600,13 @@ static ssize_t ca_read( struct file *file, char __user *buf,
 	if (count >= size)
 		dvb_ringbuffer_read_user(rb, buf, size);
 	else {
-		pr_err("%20s : msg[%d] too large - count/size %d/%d\n",
+		pr_err("%20s : msg[%d] too large - count/size %zu/%zu\n",
 			__func__, ep_in->erb.num_items, count, size);
 		DVB_RINGBUFFER_SKIP(rb, size);
 		size = 0;
 	}
 #if DEBUG_CA_IO
-	pr_info("%20s : msg[%d] size %5d - rb-free(%d)\n",
+	pr_info("%20s : msg[%d] size %5zu - rb-free(%zu)\n",
 			__func__, ep_in->erb.num_items, size,
 			dvb_ringbuffer_free(rb));
 #endif

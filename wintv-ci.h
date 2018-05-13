@@ -24,12 +24,18 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/usb.h>
-
-#include <dvbdev.h>
-#include <linux/dvb/ca.h> // CI_CA_LINK,...
 #include <linux/kthread.h>
 
+#include <linux/version.h>
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4,16,0)
+#include <dvbdev.h>
 #include "dvb_ringbuffer.h"
+#else
+#include <media/dvbdev.h>
+#include "media/dvb_ringbuffer.h"
+#endif
+
+#include <linux/dvb/ca.h> // CI_CA_LINK,...
 
 #define MIN(a,b) (((a)<=(b)) ? (a) : (b))
 #define MAX(a,b) (((a)>=(b)) ? (a) : (b))

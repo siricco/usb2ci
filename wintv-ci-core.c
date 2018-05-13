@@ -693,7 +693,7 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 	int i, rc = 0;
 
 	if (!request_firmware(&fw, fw_name, &udev->dev))
-		pr_info("located firmware %s, size %d bytes\n",fw_name, fw->size);
+		pr_info("located firmware %s, size %zu bytes\n",fw_name, fw->size);
 	else
 		return(0);
 

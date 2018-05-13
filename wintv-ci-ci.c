@@ -373,11 +373,11 @@ void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 			ci_dev->isoc_bytes_CAM = 0;
 		}
 #if DEBUG_TS_IO
-		pr_info("%s : --- %d x TS, %2d uframes - rb-avail(%d) CAM(%d) TOT(%d) sframe %d\n",
+		pr_info("%s : --- %d x TS, %2d uframes - rb-avail(%zu) CAM(%d) sframe %d\n",
 				__func__, act_size / TS_PACKET_SIZE, num_uframes,
 				dvb_ringbuffer_avail(rb)/TS_PACKET_SIZE,
 				ci_dev->isoc_bytes_CAM/TS_PACKET_SIZE,
-				ci_dev->CAM_tot_in, urb->start_frame);
+				urb->start_frame);
 #endif
 		wake_up_interruptible(&ep_in->erb.wq); /* ep-in waitqueue RB --> HOST*/
 	}
@@ -446,12 +446,12 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	int num_uframes;
 
 	size_t rb_avail			= dvb_ringbuffer_avail(&ep_out->erb.buffer);
-	size_t left			= MIN(frame_bufsize, (int)rb_avail);
+	size_t left			= MIN(frame_bufsize, rb_avail);
 	int cf, nf, ff = 0;
 	int rc, more = 0;
 
 	if (left % TS_PACKET_SIZE)
-		pr_warn("%s : TS-packets with %d trailing bytes\n", __func__, left % TS_PACKET_SIZE);
+		pr_warn("%s : TS-packets with %zu trailing bytes\n", __func__, left % TS_PACKET_SIZE);
 
 	/* write only full micro-frames or reader returns undefined data up to uframe-size ! */
 	/* write only full frames or interrupt urbs are blocked ! */
@@ -499,11 +499,11 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 		pr_warn("\n\n%s : diff. start_frames: out/in: %d/%d\n\n",
 				__func__, urb_out->start_frame, urb_in->start_frame);
 #if DEBUG_TS_IO
-	pr_info("%s : --- %d x TS, %2d uframes - rb-avail(%d) CAM(%d) TOT(%d) if:%d\n",
+	pr_info("%s : --- %zu x TS, %2d uframes - rb-avail(%zu) CAM(%d) if:%d\n",
 				__func__, left / TS_PACKET_SIZE,
 				num_uframes, rb_avail/TS_PACKET_SIZE,
 				ci_dev->isoc_bytes_CAM/TS_PACKET_SIZE,
-				ci_dev->CAM_tot_out, ff);
+				ff);
 #endif
 	return more;
 }
@@ -557,7 +557,7 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 		pr_err("     *** TS-write : ringbuffer overrun\n");
 
 	if (todo % TS_PACKET_SIZE)
-		pr_info("%s : TS-packets with %d trailing bytes(count %d, free %d)\n",
+		pr_info("%s : TS-packets with %zu trailing bytes(count %zu, free %zu)\n",
 				__func__, todo % TS_PACKET_SIZE, count, rb_free);
 
 	if (todo) {
@@ -565,7 +565,7 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 		written = dvb_ringbuffer_write_user(rb, buf, todo);
 
 		if (written != todo) {
-			pr_err("     *** TS-write error written(%d) != want(%d)\n",
+			pr_err("     *** TS-write error written(%zu) != want(%zu)\n",
 							written, todo);
 		}
 	}
@@ -586,7 +586,7 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 
 	ci_dev->isoc_bytes_RB += written; /* ringbuffer write-read diff. */
 #if DEBUG_TS_IO
-	pr_info("     *** TS-write{%02X} (%d)[%d]<%d> - rb(%d)\n", (u8) buf[0], count,
+	pr_info("     *** TS-write{%02X} (%zu)[%zu]<%zu> - rb(%d)\n", (u8) buf[0], count,
 					todo, todo/TS_PACKET_SIZE, ci_dev->isoc_bytes_RB/TS_PACKET_SIZE);
 #endif
 	if (written)
@@ -629,13 +629,13 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 		read = dvb_ringbuffer_read_user(rb, buf, avail);
 
 		if (read != avail) {
-		    pr_err("     *** TS-read error read(%d) != want(%d)\n",
+		    pr_err("     *** TS-read error read(%zu) != want(%zu)\n",
 								read, avail);
 		}
 
 		ci_dev->isoc_bytes_RB -= read; /* ringbuffer read-write diff */
 #if DEBUG_TS_IO
-		pr_info("     *** TS-read{%02X} (%d)[%d]<%d> - rb(%d)\n", (u8) buf[0], count,
+		pr_info("     *** TS-read{%02X} (%zu)[%zu]<%zu> - rb(%d)\n", (u8) buf[0], count,
 					read, read/TS_PACKET_SIZE, ci_dev->isoc_bytes_RB/TS_PACKET_SIZE);
 #endif
 	}

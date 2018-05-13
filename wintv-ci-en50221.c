@@ -34,7 +34,7 @@
 #define CAID_S2 0x648
 #define CAID_T2 0x69C
 
-#define PATCH_CAID 0 /* 9/1 */
+#define PATCH_CAID 0 /* 0/1 */
 #define FORCED_CAID CAID_T2
 
 /* en50221: A.4.1.13 List of transport tags */
@@ -255,8 +255,9 @@ void dump_io_tpdu( u8 *buf, size_t count, const char *func, int dir_in) {
 	u8 slot = buf[0];
 	u8 tcid = buf[1];
 	u32 atag = 0;
+#if PATCH_CAID
 	u16 caid_old;
-
+#endif
 	int i = 2;
 
 	tag_num = buf[i++]; 
@@ -317,7 +318,7 @@ void dump_io_tpdu( u8 *buf, size_t count, const char *func, int dir_in) {
 	}
 
 	if (tag_str) {
-		pr_info("[%-4s] %s (%d)(%d)[%2d] *** (%X) %s ***\n",
+		pr_info("[%-4s] %s (%d)(%d)[%2zu] *** (%X) %s ***\n",
 					(dir_in) ? "CAM" : "HOST",
 					func, slot, tcid, count,
 					tag_num,tag_str);
