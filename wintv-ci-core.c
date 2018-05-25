@@ -480,20 +480,22 @@ int CI_50_GetStatus(struct wintv_ci_dev *wintvci, unsigned char *status)
 #undef DGB_STATUS
 
 static int CI_60_Negotiate(struct wintv_ci_dev *wintvci, 
-						unsigned short *linksize)
+						unsigned short link_size)
 {
 	struct msg_reply reply;
+	unsigned short nego_size;
 	char buf[2];
 	int rc;
 
-	buf[0] = (*linksize >> 8) & 0xff; /* msb */
-	buf[1] = *linksize & 0xff;
-
+	buf[0] = (link_size >> 8) & 0xff; /* msb */
+	buf[1] = link_size & 0xff;
 	rc = CI_WriteExchange(wintvci, CI_60_NEGOTIATE, &reply, buf, sizeof buf);
 	if (!rc) {
-		*linksize =	reply.buffer[0] << 8 |
+		nego_size =	reply.buffer[0] << 8 |
 				reply.buffer[1];
-		wintvci->slot.link_layer_size = *linksize;
+		if (nego_size != link_size)
+			pr_info("LINK_LAYER SIZE : %d bytes\n", nego_size);
+		wintvci->slot.link_layer_size = nego_size;
 	}
 	return(rc);
 }
@@ -560,7 +562,7 @@ int cam_state_monitor(struct wintv_ci_dev *wintvci)
 	case USBCI_STATE_LNK:
 		link_size = CA_LINK_LAYER_SIZE;
 		// link_size = 0xffff; /* returns a max. link-layer size of 0x400 (1024.) bytes */
-		rc = CI_60_Negotiate(wintvci, &link_size);
+		rc = CI_60_Negotiate(wintvci, link_size);
 		if (rc)
 			break;
 

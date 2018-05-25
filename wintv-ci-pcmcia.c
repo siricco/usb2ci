@@ -194,8 +194,8 @@ int parse_cis(unsigned char *cis, int size, struct slot_info *s_info) {
 
 			if_type = cis[i+1] & 0xF;
 			if (if_type != (cc_index+4)) { /* custom interfaces start at 4 */
-				pr_info("%s : skip Interface description for IF-index %d\n",
-							__func__, if_type);
+				pr_info("%s : skip Interface description for IF-index %d, cfg-options 0x%X\n",
+							__func__, if_type, tpce_idx & 0x3F);
 				continue;
 			}
 

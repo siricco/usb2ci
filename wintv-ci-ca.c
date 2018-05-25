@@ -336,23 +336,24 @@ error:
 static int ca_poll_tpdu(struct ca_device *ca_dev)
 {
 	unsigned char status;
-	int rc;
+	int rc = 0;
 
 	if (mutex_lock_interruptible(&ca_dev->ca_mutex))
 		return -ERESTARTSYS;
 
-	/* wait for FR, on DA fetch incoming TPDUs */
+	/* wait for FREE, on DATA fetch incoming TPDUs */
 	do {
 		rc = ca_wait_for_status(ca_dev, STATUSBIT_DA | STATUSBIT_FR,
 						&status, TMO_STATUS_MS);
-		if (rc)
-			break;
-		if (status & STATUSBIT_FR)
-			break;
-		rc = rb_read_tpdu(ca_dev);
-		if (rc)
-			break;
-	} while (1);
+		if (!rc) {
+			/* some CAMs (SmarDTV) have FR-bit allways set,
+			   check for DA-bit first */
+			if (status & STATUSBIT_DA)
+				rc = rb_read_tpdu(ca_dev);
+			else /* (status & STATUSBIT_FR) */
+				break;
+		}
+	} while (!rc); // while DA-bit was set
 
 	mutex_unlock(&ca_dev->ca_mutex);
 
