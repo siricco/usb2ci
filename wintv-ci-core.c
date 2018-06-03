@@ -1103,12 +1103,24 @@ static void wintv_usb_ci_disconnect(struct usb_interface *intf) {
 }
 
 static struct usb_device_id wintv_usb_ci_table [] = {
-	/* Hauppauge - Wintv-CI-USB2 */
-	{ USB_DEVICE( 0x2040, 0x1100 ),
+	/* SmarDTV / Mascom - SmarCAM Adapter */
+	{ USB_DEVICE( 0x2040, 0x1100 ), /* Hauppauge WintTV-CI USB */
 	    .driver_info = (unsigned long) &wintv_ci_info
 	},
-	/* SmarDTV - USB2CI (Terratec Cinergy USB2CI) */
-	{ USB_DEVICE( 0x1B0D, 0x5F0F ),
+	{ USB_DEVICE( 0x1B0D, 0x5F10 ), /* SmarDTV */
+	    .driver_info = (unsigned long) &usb2_ci_info
+	},
+	{ USB_DEVICE( 0x1B0D, 0x5F20 ), /* SmarDTV */
+	    .driver_info = (unsigned long) &usb2_ci_info
+	},
+	/* SmarDTV - USBCAM-T */
+	{ USB_DEVICE( 0x0CCD, 0x0074 ), /* TerraTec Cinergy CI USB */
+	    .driver_info = (unsigned long) &usb2_ci_info
+	},
+	{ USB_DEVICE( 0x1B0D, 0x5F0F ), /* SmarDTV / Terratec */
+	    .driver_info = (unsigned long) &usb2_ci_info
+	},
+	{ USB_DEVICE( 0x1B0D, 0xDF01 ), /* SmarDTV */
 	    .driver_info = (unsigned long) &usb2_ci_info
 	},
 	{}

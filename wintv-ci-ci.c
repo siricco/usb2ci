@@ -454,8 +454,9 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 		pr_warn("%s : TS-packets with %zu trailing bytes\n", __func__, left % TS_PACKET_SIZE);
 
 	/* write only full micro-frames or reader returns undefined data up to uframe-size ! */
-	/* write only full frames or interrupt urbs are blocked ! */
-	/* 1 full frame -> 8 uframes * 4*188=752 = 6016 bytes per frame (1ms) */
+	/* write only full frames or interrupt urbs (ca-device) are blocked ! */
+	/* start the urbs exactly at a SOF or interrupt urbs (ca-device) are blocked ! */
+	/* 1 full frame -> 8 uframes * 4*188=752 = 6016 bytes per frame (1ms) ==> max.~48 Mbit/s */
 
 	left -= left % TS_MIN_UF(uframe_size);
 	if (!left)
@@ -474,12 +475,16 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	more = ((rb_avail - left) >= TS_MIN_UF(uframe_size)); /* we can handele more urbs */
 	ci_dev->isoc_bytes_CAM += left;
 
-	/* +++IMPORTANT++ start at SOF - currently no other way to set a start-frame */
-	cf = usb_get_current_frame_number(ci_dev->wintvci->udev);
-	do {
-		nf = usb_get_current_frame_number(ci_dev->wintvci->udev);
-		ff++;
-	} while (nf > -1 && nf == cf);
+	/* +++IMPORTANT++ align the first urb transfers to SOF ! */
+	/* it seems, there is currently no way to set the urb start_frame */
+
+	if (!urb_index) {
+		cf = usb_get_current_frame_number(ci_dev->wintvci->udev);
+		do {
+			nf = usb_get_current_frame_number(ci_dev->wintvci->udev);
+			ff++;
+		} while (nf > -1 && nf == cf); // loops many 100 times !
+	}
 
 	/* submit out-urb - at first */
 	rc = usb_submit_urb(urb_out, GFP_ATOMIC);
@@ -496,10 +501,10 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	ci_dev->isoc_urbs_running++;
 
 	if (urb_out->start_frame != urb_in->start_frame)
-		pr_warn("\n\n%s : diff. start_frames: out/in: %d/%d\n\n",
+		pr_warn("%s : diff. start_frames: out/in: %d/%d",
 				__func__, urb_out->start_frame, urb_in->start_frame);
 #if DEBUG_TS_IO
-	pr_info("%s : --- %zu x TS, %2d uframes - rb-avail(%zu) CAM(%d) if:%d\n",
+	pr_info("%s : --- %zu x TS, %2d uframes - rb-avail(%zu) CAM(%d) ff:%d\n",
 				__func__, left / TS_PACKET_SIZE,
 				num_uframes, rb_avail/TS_PACKET_SIZE,
 				ci_dev->isoc_bytes_CAM/TS_PACKET_SIZE,
@@ -533,6 +538,10 @@ static void ts_CAM_exchange(struct ci_device *ci_dev)
 		if (!more)
 			break;
 	}
+#if DEBUG_TS_IO
+	if (i++)
+	    pr_info("%s :  %d urb transfers", __func__, i); // shows 4 .. 6 Mbit/s within 1 transfer
+#endif
 }
 
 static ssize_t ts_write(struct file *file, const __user char *buf,
