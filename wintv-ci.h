@@ -157,7 +157,7 @@ struct ep_info {
 	unsigned char	addr;
 	unsigned int	pipe;
 	int		maxp;
-	int		interval;
+	int		binterval;
 
 	union {
 		struct isoc_info isoc;

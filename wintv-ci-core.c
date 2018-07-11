@@ -291,7 +291,7 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 					&transmitted, USB_CMD_TIMEOUT);
 
 		if (rc || (intr->pkt.hdr->reply != CI_CMD_R)) {
-			if (rc != CI_ERR_30_NO_CAM)
+			if (intr->pkt.hdr->reply != CI_ERR_30_NO_CAM)
 				pr_err("%-20s: [%02X] rc: %d s:%02X f:%02X r:%02X l:%d\n",
 					__func__, CI_CMD_R, rc,
 					intr->pkt.hdr->state, intr->pkt.hdr->flag,
@@ -668,7 +668,7 @@ static int wintv_usb_ci_parse_firmware( const struct firmware *fw,
 					(fwbh->cadr == 0)) { /* FW end-marker found */
 					*adr_min = ram_min;
 					*adr_max = ram_top-1;
-					pr_info("*** FW *** block-size %02X, block-cnt %d, adr-low 0x%04X, adr-top 0x%04X\n",
+					pr_info("*** FW *** block-size %02X, block-cnt %d, RAM address range: 0x%04X - 0x%04X\n",
 							block_size, num_blocks, ram_min, ram_top);
 					return(block_size);
 				}
@@ -908,13 +908,13 @@ static int wintv_usb_ci_setup_endpoints(struct wintv_ci_dev *wintvci)
 		 /* no MAXP_MULT in kernels <= 4.8 ? */
 		epi->maxp		= __le16_to_cpu(epd->wMaxPacketSize) & 0x7FF;
 		epi->maxp		*= ((__le16_to_cpu(epd->wMaxPacketSize) >> 11) & 0x3) + 1;
-		epi->interval		= epd->bInterval;
+		epi->binterval		= epd->bInterval;
 
 		pr_info("  EP %d %-3s (%-4s) Addr : 0x%02X, Maxp %4d Ival %d\n",
 			addr & USB_ENDPOINT_NUMBER_MASK,
 			(dir == USB_DIR_IN) ? "IN" : "OUT",
 			name_ep_type[type],
-			addr, epi->maxp, epi->interval);
+			addr, epi->maxp, epi->binterval);
 	}
 
 	if (	!wintvci->ca_dev.ep_intr_in.addr  ||

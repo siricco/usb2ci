@@ -68,7 +68,7 @@ static int ts_rb_alloc(struct ep_info *ep,
 	dvb_ringbuffer_init(&ep->erb.buffer, buf, size);
 	ep->erb.num_items = 0;
 
-	pr_info("%s : EP(%02X) ringbuffer size %d bytes (%d x %d / %d TS-packets)\n",
+	pr_info("%s : EP(%02X) ringbuffer size %d bytes (%d x %d | %d TS-packets)\n",
 				__func__, ep->addr, size,
 				num_transfers, ts/num_transfers, ts);
 	return 0;
@@ -78,7 +78,14 @@ static int ts_rb_alloc(struct ep_info *ep,
  *  U S B - U R B   ( S T R E A M I N G )
  */
 
-#define URB_COHERENT 1
+/*
+*  despite hardware coherent DMA is supported (allmost) only on x86 systems
+*  and the usage very likely slows down memcpy() on all other platforms,
+*  it seems that for plain streaming it is neither required or has any real benefit.
+*  So don't use it. See also -> https://patchwork.kernel.org/patch/10468937/
+*/
+#define URB_COHERENT_DMA 0
+/*----------------------*/
 
 static void ci_isoc_kill_urbs(struct ep_info *ep)
 {
@@ -109,7 +116,7 @@ static void ci_isoc_free(struct ep_info *ep)
 
 		usb_kill_urb(xfer->urb);
 		usb_free_urb(xfer->urb);
-#if URB_COHERENT
+#if URB_COHERENT_DMA
 		usb_free_coherent(ep->wintvci->udev,
 					isoc->transfer_size,
 					xfer->xfer_buffer,
@@ -148,7 +155,7 @@ static int ci_isoc_allocate(struct ep_info *ep,
 	if (!isoc->transfers)
 		return -ENOMEM;
 
-	pr_info("%s : EP(%02X) init %d urbs (%d uframes / %d TS-packets each urb)\n",
+	pr_info("%s : EP(%02X) init %d urbs (%d uframes | %d TS-packets each urb)\n",
 				__func__, ep->addr, num_transfers, num_uframes,
 				isoc->transfer_size / TS_PACKET_SIZE);
 
@@ -168,7 +175,7 @@ static int ci_isoc_allocate(struct ep_info *ep,
 		}
 
 		/* allocate transfer buffer */
-#if URB_COHERENT
+#if URB_COHERENT_DMA
 		tbuf = usb_alloc_coherent(ep->wintvci->udev,
 				isoc->transfer_size, GFP_ATOMIC, &dma_addr);
 #else
@@ -215,7 +222,8 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 		urb->dev			= udev;
 		urb->context			= ep;
 		urb->pipe			= ep->pipe;
-		urb->interval			= ep->interval;
+		 /* USB2 High-Speed: encoded in power of 2 */
+		urb->interval			= 1 << (ep->binterval - 1); /* 1 << (1 - 1) = 1 */
 
 		urb->complete			= ts_urb_complete;
 		/*
@@ -226,7 +234,7 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 		   scheduled 1 micro-frame after iso-in.
 		*/
 		urb->transfer_flags		= 0;
-#if URB_COHERENT
+#if URB_COHERENT_DMA
 		urb->transfer_flags		|= URB_NO_TRANSFER_DMA_MAP;
 		urb->transfer_dma		= xfer->dma_addr;
 #endif

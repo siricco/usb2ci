@@ -107,7 +107,6 @@ static void ca_intr_bulk_exit(struct ca_device *ca_dev)
 
 	ep = &ca_dev->ep_bulk_out;
 	kfree(ep->u.bulk.pkt.buffer);
-	ca_rb_free(ep);
 }
 
 #define CA_RB_ITEMS 100 /* 100 x LL-size = ca. 16 x MAX_TPDU */
@@ -118,9 +117,6 @@ static int ca_intr_bulk_init(struct ca_device *ca_dev)
 	int rc;
 
 	ep = &ca_dev->ep_bulk_out;
-	rc = ca_rb_alloc(ep, CA_RB_ITEMS * CA_LINK_LAYER_SIZE);
-	if (rc)
-		return rc;
 	rc = ca_bulk_allocate(ep); /* only packet-out buffer */
 	if (rc)
 		return rc;
