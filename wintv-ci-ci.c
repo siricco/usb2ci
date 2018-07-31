@@ -28,6 +28,7 @@
 
 #include "wintv-ci.h"
 
+#include <linux/module.h>
 #include <linux/wait.h>
 #include <linux/poll.h>
 
@@ -41,6 +42,21 @@
 
 /* a lot of TS in/out massages */
 #define DEBUG_TS_IO 0
+
+static int use_dma_coherent = 0;
+/*
+*  despite hardware coherent DMA is supported (allmost) only on x86 systems
+*  and the usage very likely slows down memcpy() on all other platforms,
+*  it seems that for plain streaming it is neither required or has any real benefit.
+*  So better don't use it. See also -> https://patchwork.kernel.org/patch/10468937/
+*/
+module_param(use_dma_coherent, int, 0644);
+MODULE_PARM_DESC(use_dma_coherent, " Use usb_alloc_coherent() for isoc-urbs - not recommended for most non-x86 hardware (default:off).");
+
+static int show_ts_bitrate = 0;
+
+module_param(show_ts_bitrate, int, 0644);
+MODULE_PARM_DESC(show_ts_bitrate, " Report the current TS datarate (every 10 secs) (default:off).");
 
 /* --- R I N G B U F F E R --- */
 
@@ -78,15 +94,6 @@ static int ts_rb_alloc(struct ep_info *ep,
  *  U S B - U R B   ( S T R E A M I N G )
  */
 
-/*
-*  despite hardware coherent DMA is supported (allmost) only on x86 systems
-*  and the usage very likely slows down memcpy() on all other platforms,
-*  it seems that for plain streaming it is neither required or has any real benefit.
-*  So don't use it. See also -> https://patchwork.kernel.org/patch/10468937/
-*/
-#define URB_COHERENT_DMA 0
-/*----------------------*/
-
 static void ci_isoc_kill_urbs(struct ep_info *ep)
 {
 	struct isoc_info *isoc	= &ep->u.isoc;
@@ -116,14 +123,13 @@ static void ci_isoc_free(struct ep_info *ep)
 
 		usb_kill_urb(xfer->urb);
 		usb_free_urb(xfer->urb);
-#if URB_COHERENT_DMA
-		usb_free_coherent(ep->wintvci->udev,
-					isoc->transfer_size,
-					xfer->xfer_buffer,
-					xfer->dma_addr);
-#else
-		kfree(xfer->xfer_buffer);
-#endif
+		if (use_dma_coherent)
+			usb_free_coherent(ep->wintvci->udev,
+						isoc->transfer_size,
+						xfer->xfer_buffer,
+						xfer->dma_addr);
+		else
+			kfree(xfer->xfer_buffer);
 	}
 	kfree(isoc->transfers);
 	isoc->num_transfers	= 0;
@@ -175,12 +181,12 @@ static int ci_isoc_allocate(struct ep_info *ep,
 		}
 
 		/* allocate transfer buffer */
-#if URB_COHERENT_DMA
-		tbuf = usb_alloc_coherent(ep->wintvci->udev,
-				isoc->transfer_size, GFP_ATOMIC, &dma_addr);
-#else
-		tbuf = kzalloc(isoc->transfer_size, GFP_ATOMIC);
-#endif
+		if (use_dma_coherent)
+			tbuf = usb_alloc_coherent(ep->wintvci->udev,
+				isoc->transfer_size, GFP_KERNEL, &dma_addr);
+		else
+			tbuf = kzalloc(isoc->transfer_size, GFP_KERNEL);
+
 		if (!tbuf) {
 			pr_err("%s : EP(%02X) allocate buffer #%d failed\n",
 						__func__, ep->addr, i);
@@ -234,11 +240,13 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 		   scheduled 1 micro-frame after iso-in.
 		*/
 		urb->transfer_flags		= 0;
-#if URB_COHERENT_DMA
-		urb->transfer_flags		|= URB_NO_TRANSFER_DMA_MAP;
-		urb->transfer_dma		= xfer->dma_addr;
-#endif
-		urb->transfer_buffer 		= xfer->xfer_buffer;
+
+		if (use_dma_coherent) {
+			urb->transfer_flags	|= URB_NO_TRANSFER_DMA_MAP;
+			urb->transfer_dma	= xfer->dma_addr;
+		}
+		else
+			urb->transfer_buffer	= xfer->xfer_buffer;
 
 		urb->number_of_packets		= isoc->num_uframes;
 		urb->transfer_buffer_length 	= isoc->transfer_size;
@@ -480,7 +488,7 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	urb_in->number_of_packets = num_uframes;
 	dvb_ringbuffer_read(&ep_out->erb.buffer, urb_out->transfer_buffer, left);
 
-	more = ((rb_avail - left) >= TS_MIN_UF(uframe_size)); /* we can handele more urbs */
+	more = ((rb_avail - left) >= TS_MIN_UF(uframe_size)); /* we can send more urbs */
 	ci_dev->isoc_bytes_CAM += left;
 
 	/* +++IMPORTANT++ align the first urb transfers to SOF ! */
@@ -563,10 +571,8 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 	struct dvb_ringbuffer *rb	= &ep->erb.buffer;
 
 	size_t rb_free = dvb_ringbuffer_free(rb);
-
 	size_t todo = MIN(rb_free, count);
 	size_t written = 0;
-	unsigned long timer_now;
 
 	ci_dev->isoc_enabled = 1;
 
@@ -580,32 +586,31 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 	if (todo) {
 		/* copy_from_user */
 		written = dvb_ringbuffer_write_user(rb, buf, todo);
-
-		if (written != todo) {
+		if (written != todo)
 			pr_err("     *** TS-write error written(%zu) != want(%zu)\n",
-							written, todo);
+								written, todo);
+		ci_dev->isoc_bytes_RB += written; /* ringbuffer write-read diff. */
+#if DEBUG_TS_IO
+		pr_info("     *** TS-write{%02X} (%zu)[%zu]<%zu> - rb(%d)\n", (u8) buf[0], count,
+					todo, todo/TS_PACKET_SIZE, ci_dev->isoc_bytes_RB/TS_PACKET_SIZE);
+#endif
+	}
+#define TS_COUNT_TIMEOUT (HZ * 10) /* secs */
+	if (show_ts_bitrate) {
+		unsigned long timer_now = jiffies;
+		ci_dev->ts_count_interval += written; /* FIXME - handle overflow */
+
+		if (ci_dev->ts_count_timeout <= timer_now) {
+			int time = timer_now - ci_dev->ts_count_timeout + TS_COUNT_TIMEOUT;
+			int mbitx100 = ci_dev->ts_count_interval/time*HZ*8; /* bits/second */
+			mbitx100 /= (1000*1000/100);
+
+			pr_info("     +++ TS-BITRATE : %d.%02d Mbit/s\n", mbitx100/100,mbitx100 % 100);
+			ci_dev->ts_count_timeout = timer_now + TS_COUNT_TIMEOUT;
+			ci_dev->ts_count_interval = 0;
 		}
 	}
 
-#define TS_COUNT_TIMEOUT (HZ * 5) /* secs */
-	timer_now = jiffies;
-	ci_dev->ts_count_interval += written;
-
-	if (ci_dev->ts_count_timeout <= timer_now) {
-		int time = timer_now - ci_dev->ts_count_timeout + TS_COUNT_TIMEOUT;
-		int mbitx100 = ci_dev->ts_count_interval/time*HZ*8; /* bits/second */
-		mbitx100 /= (1000*1000/100);
-
-		pr_info("     +++ TS-BITRATE : %d.%02d Mbit/s\n", mbitx100/100,mbitx100 % 100);
-		ci_dev->ts_count_timeout = timer_now + TS_COUNT_TIMEOUT;
-		ci_dev->ts_count_interval = 0;
-	}
-
-	ci_dev->isoc_bytes_RB += written; /* ringbuffer write-read diff. */
-#if DEBUG_TS_IO
-	pr_info("     *** TS-write{%02X} (%zu)[%zu]<%zu> - rb(%d)\n", (u8) buf[0], count,
-					todo, todo/TS_PACKET_SIZE, ci_dev->isoc_bytes_RB/TS_PACKET_SIZE);
-#endif
 	if (written)
 		ts_CAM_exchange(ci_dev);
 
@@ -623,33 +628,15 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 	struct ep_info *ep		= &ci_dev->ep_isoc_in;
 	struct dvb_ringbuffer *rb	= &ep->erb.buffer;
 
-	size_t avail, read;
-	size_t rb_avail = dvb_ringbuffer_avail(&ep->erb.buffer);
-#if 0
-	if (!rb_avail) {
-		/* only if not in nonblocking mode */
-		if ((file->f_flags & O_NONBLOCK) == 0) {
-			/* wait for some data */
-			if (wait_event_interruptible(
-					ep->erb.wq,
-					RB_READ_CONDITION(ep)) < 0)
-				return 0;
-			rb_avail = dvb_ringbuffer_avail(&ep->erb.buffer);
-		}
-	}
-#endif
-	avail = MIN(rb_avail, count);
-	read = 0;
+	size_t read = 0;
+	size_t avail = MIN(dvb_ringbuffer_avail(rb), count);
 
 	if (avail) {
 		/* copy_to_user */
 		read = dvb_ringbuffer_read_user(rb, buf, avail);
-
-		if (read != avail) {
-		    pr_err("     *** TS-read error read(%zu) != want(%zu)\n",
+		if (read != avail)
+			pr_err("     *** TS-read error read(%zu) != want(%zu)\n",
 								read, avail);
-		}
-
 		ci_dev->isoc_bytes_RB -= read; /* ringbuffer read-write diff */
 #if DEBUG_TS_IO
 		pr_info("     *** TS-read{%02X} (%zu)[%zu]<%zu> - rb(%d)\n", (u8) buf[0], count,
@@ -658,8 +645,6 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 	}
 	return read;
 }
-
-#define PR_MASK_POLL 0x7F /* dont show all calls */
 
 static unsigned int ts_poll(struct file *file, poll_table *wait)
 {
@@ -673,38 +658,14 @@ static unsigned int ts_poll(struct file *file, poll_table *wait)
 	unsigned int mask = 0;
 
 //	pr_info("%s\n",__func__);
-#if 0
-	int pollin = RB_READ_CONDITION(ep_in);
-	/* only if not in nonblocking mode */
-	if (!pollin && ((file->f_flags & O_NONBLOCK) == 0)) {
-		/* wait for data thru ts_write */
-		if (wait_event_interruptible(
-					ep_in->erb.wq,
-					RB_READ_CONDITION(ep_in)) < 0)
-			return 0;
-		pollin = true;
-	}
-	if (pollin)
-		mask |= POLLIN;
-#else
-	poll_wait(file, &ep_in->erb.wq, wait);
-	poll_wait(file, &ep_out->erb.wq, wait);
+
+	if (!RB_READ_CONDITION(ep_in))
+		poll_wait(file, &ep_in->erb.wq, wait);
 
 	if (RB_READ_CONDITION(ep_in)) 
-		mask |= POLLIN | POLLRDNORM;
+		mask |= POLLIN;
 	if (RB_WRITE_CONDITION(ep_out))
-		mask |= POLLOUT | POLLWRNORM;
-#endif
-	/* DEBUG */
-	if ((ci_dev->ci_poll_cnt & PR_MASK_POLL) == 0) {
-		pr_info("     *** TS-poll(%02X) [%d]***\n", mask, ci_dev->ci_poll_cnt);
-		ci_dev->ci_poll_cnt = 0;
-	}
-	if (ci_dev->ci_last_poll_state != mask) {
-		ci_dev->ci_last_poll_state = mask;
-		ci_dev->ci_poll_cnt = 0;
-	}
-	ci_dev->ci_poll_cnt++;
+		mask |= POLLOUT;
 
 	return mask;
 }
@@ -735,9 +696,6 @@ void ci_reset(struct wintv_ci_dev *wintvci)
 
 	ci_dev->isoc_bytes_RB = 0;
 	ci_dev->isoc_bytes_CAM = 0;
-
-	ci_dev->ci_poll_cnt = 0;
-	ci_dev->ci_last_poll_state = 0;
 
 	ci_dev->ts_count_total = 0;
 	ci_dev->ts_count_interval = 0;

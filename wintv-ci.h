@@ -190,8 +190,7 @@ struct ca_device {
 
 	struct task		ca_task;
 
-	int		ca_poll_cnt;
-	unsigned int	ca_last_poll_state;
+	int		ca_cam_state;
 };
 
 struct ci_device {
@@ -206,9 +205,6 @@ struct ci_device {
 	int			isoc_enabled;		/* streaming 0/1 */
 	int			isoc_urbs_running;	/* #of urbs running */
 	wait_queue_head_t	isoc_urbs_wq;		/* urb wait-queue */
-
-	int		ci_poll_cnt;
-	unsigned int	ci_last_poll_state;
 
 	int		ts_count_total;
 	int		ts_count_interval;

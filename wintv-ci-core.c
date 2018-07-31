@@ -341,13 +341,12 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 //static 
 int cam_state_set(struct wintv_ci_dev *wintvci, int usbci_state)
 {
-	if (!usbci_state || (wintvci->slot.usbci_state == usbci_state))
+	if (!usbci_state || wintvci->slot.usbci_state == usbci_state)
 		return 0;
 
 	pr_info("%-20s: %02X -> %02X\n",
 			__func__, wintvci->slot.usbci_state, usbci_state);
 
-	wintvci->slot.usbci_state = usbci_state;
 	switch(usbci_state) {
 	case USBCI_STATE_NON:
 	default:
@@ -366,6 +365,7 @@ int cam_state_set(struct wintv_ci_dev *wintvci, int usbci_state)
 		wintvci->slot.cam_state = CA_CI_MODULE_READY;
 		break;
 	}
+	wintvci->slot.usbci_state       = usbci_state;
 	return 0;
 }
 
@@ -534,7 +534,6 @@ int cam_state_monitor(struct wintv_ci_dev *wintvci)
 {
 	unsigned short link_size;
 	unsigned char status;
-	int wakeup = (wintvci->slot.usbci_state == USBCI_STATE_RST);
 	int rc = 0;
 
 	//pr_info(">>> %s\n",__func__);
@@ -575,8 +574,7 @@ int cam_state_monitor(struct wintv_ci_dev *wintvci)
 		break;
 	}
 
-	if (wakeup)
-		wake_up_interruptible(&wintvci->slot.cam_wq);
+	wake_up_interruptible(&wintvci->slot.cam_wq);
 	return rc;
 }
 
@@ -1129,7 +1127,7 @@ MODULE_DEVICE_TABLE (usb, wintv_usb_ci_table);
 
 MODULE_AUTHOR("Helmut Binder");
 MODULE_DESCRIPTION("Hauppauge WinTV-CI USB2 Common Interface driver");
-MODULE_VERSION("0.2");
+MODULE_VERSION("0.2.10");
 MODULE_LICENSE("GPL");
 
 static struct usb_driver wintv_usb_ci_driver = {

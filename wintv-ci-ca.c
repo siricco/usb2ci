@@ -20,18 +20,21 @@
  * http://www.gnu.org/copyleft/gpl.html
  */
 
-
 /*
  *  C A - D E V I C E  ( T P D U )
  */
 
 #include "wintv-ci.h"
 
-/* show some TPDU massages */
-#define DEBUG_TPDU 1
+#include <linux/module.h>
 
 /* a lot of CA in/out massages */
 #define DEBUG_CA_IO 0
+
+static int show_tpdu_info = 0;
+
+module_param(show_tpdu_info, int, 0644);
+MODULE_PARM_DESC(show_tpdu_info, " Show/Dump TPDU messages (default:off).");
 
 /* --- R I N G B U F F E R --- */
 
@@ -136,6 +139,18 @@ static int ca_intr_bulk_init(struct ca_device *ca_dev)
  * Kernel thread which monitors CAM changes.
  */
 
+// Wake up the CAM monitor
+
+static void ca_thread_wakeup(struct ca_device *ca_dev)
+{
+//	pr_info("%s\n", __func__);
+
+	ca_dev->ca_task.wakeup = 1;
+	wake_up_process(ca_dev->ca_task.thread);
+}
+
+// run the CAM monitor
+
 static int ca_thread(void *data)
 {
 	struct ca_device *ca_dev = data;
@@ -143,7 +158,7 @@ static int ca_thread(void *data)
 //	pr_info("%s starting\n", __func__);
 
 	/* choose the initial delay */
-	ca_dev->ca_task.delay = HZ; /* 1 sec */
+	ca_dev->ca_task.delay = HZ * 2; /* 2 sec */
 
 	/* main loop */
 	while (!kthread_should_stop()) {
@@ -317,9 +332,9 @@ static int rb_read_tpdu(struct ca_device *ca_dev)	// CAM INTR_IN --> ringbuffer
 				__func__, ep_in->erb.num_items, size,
 				dvb_ringbuffer_free(rb));
 #endif
-#if DEBUG_TPDU
-	dump_io_tpdu((u8 *)buf, size, __func__, 1);
-#endif
+	if (show_tpdu_info)
+		dump_io_tpdu((u8 *)buf, size, __func__, 1);
+
 	kfree(buf);
 	return 0;
 error:
@@ -441,10 +456,11 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg)
 			return -1;
 
 		cam_state_set(wintvci, USBCI_STATE_RST);
-
+		// wait until the reset is done
 		wait_event_interruptible(
 				wintvci->slot.cam_wq,
 				wintvci->slot.usbci_state != USBCI_STATE_RST);
+		ca_thread_wakeup(ca_dev);
 
 		mutex_unlock(&ca_dev->ca_ioctl_mutex);
 		break;
@@ -473,16 +489,24 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg)
 			//return -EINVAL;
 			return -1;
 
+		// if the cam_state has not changed since last query
+		// slow down polling to the frequency of the cam_monitor events
+		if (ca_dev->ca_cam_state != wintvci->slot.cam_state)
+			wait_event_interruptible(
+					wintvci->slot.cam_wq,
+					true);
+
 		info->type  = CA_CI_LINK;
 		info->flags = wintvci->slot.cam_state;
 
-		if (info->flags != CA_CI_MODULE_READY)
+		if (ca_dev->ca_cam_state != wintvci->slot.cam_state)
 			pr_info("%s : %s [%d] : CAM %s\n", __func__,
 				"CA_GET_SLOT_INFO",
 				info->num,
 				(info->flags == CA_CI_MODULE_READY) ? "READY" :
 				(info->flags == CA_CI_MODULE_PRESENT) ? "PRESENT" :
 				"REMOVED");
+		ca_dev->ca_cam_state = wintvci->slot.cam_state;
 		break;
 	}
 
@@ -536,6 +560,7 @@ static ssize_t ca_write(struct file *file, const char __user *buf,
 	u8 *msg;
 
 	//pr_info("%s: %d\n", __func__, count);
+
 	if (count <= 0)
 		return 0;
 
@@ -554,9 +579,8 @@ static ssize_t ca_write(struct file *file, const char __user *buf,
 #if DEBUG_CA_IO
 	pr_info("%20s : %d:%d size %5zu\n", __func__, slot, tcid, count-2);
 #endif
-#if DEBUG_TPDU
-	dump_io_tpdu(msg, count, __func__, 0);
-#endif
+	if (show_tpdu_info)
+		dump_io_tpdu(msg, count, __func__, 0);
 
 	rc = CA_send_TPDU(ca_dev, slot, tcid, msg+2, count-2); /* MSG --> CAM BULK_OUT */
 	if (rc)
@@ -580,20 +604,17 @@ static ssize_t ca_read( struct file *file, char __user *buf,
 
 	size_t size = 0;
 
-	//pr_info("%s: %d\n", __func__, count);
+	//pr_info("%s: %d / %d\n", __func__, count, ep_in->erb.num_items);
 
-	if (!CA_READ_CONDITION(ep_in))	/* CAM -> RB */
-		if (wait_event_interruptible(
-					ep_in->erb.wq,
-					CA_READ_CONDITION(ep_in)) < 0)
-			return 0;
+	if (!CA_READ_CONDITION(ep_in))
+		goto done;
 
 	ep_in->erb.num_items--;
 
 	size = DVB_RINGBUFFER_PEEK(rb, 0) << 8;
 	size |= DVB_RINGBUFFER_PEEK(rb, 1);
-
 	DVB_RINGBUFFER_SKIP(rb, 2);
+
 	if (count >= size)
 		dvb_ringbuffer_read_user(rb, buf, size);
 	else {
@@ -607,10 +628,10 @@ static ssize_t ca_read( struct file *file, char __user *buf,
 			__func__, ep_in->erb.num_items, size,
 			dvb_ringbuffer_free(rb));
 #endif
+done:
 	return size;
 }
 
-#define PR_POLL_CNT 0x0F
 static unsigned int ca_poll(struct file *file, poll_table *wait)
 {
 	struct dvb_device *dvbdev	= file->private_data;
@@ -619,26 +640,15 @@ static unsigned int ca_poll(struct file *file, poll_table *wait)
 
 	struct ep_info *ep_in		= &ca_dev->ep_intr_in;
 
-	unsigned int mask = POLLOUT | POLLWRNORM;
+	unsigned int mask = POLLOUT;
 
 	//pr_info("%s:\n", __func__);
 
-	poll_wait(file, &ep_in->erb.wq, wait);	/* CAM -> RB */
+	if (!CA_READ_CONDITION(ep_in))
+		poll_wait(file, &ep_in->erb.wq, wait);	/* CAM -> RB */
 
-	if (CA_READ_CONDITION(ep_in)) 
-		mask |= POLLIN | POLLRDNORM;
-
-	/* DEBUG */
-	if ((ca_dev->ca_poll_cnt & PR_POLL_CNT) == 0) {
-		pr_info("   *** CA-poll(%02X) [%d]***\n",
-					mask, ca_dev->ca_poll_cnt);
-		ca_dev->ca_poll_cnt = 0;
-	}
-	if (ca_dev->ca_last_poll_state != mask) {
-		ca_dev->ca_last_poll_state = mask;
-		ca_dev->ca_poll_cnt = 0;
-	}
-	ca_dev->ca_poll_cnt++;
+	if (CA_READ_CONDITION(ep_in))
+		mask |= POLLIN;
 
 	return mask;
 }
@@ -697,8 +707,7 @@ int ca_attach(struct wintv_ci_dev *wintvci)
 
 	init_waitqueue_head(&ca_dev->ep_intr_in.erb.wq);
 
-	ca_dev->ca_poll_cnt = 0;
-	ca_dev->ca_last_poll_state = 0;
+	ca_dev->ca_cam_state = -1;
 
 	/* allocate usb pkt/msg/ringbuffers */
 	rc = ca_intr_bulk_init(ca_dev);
