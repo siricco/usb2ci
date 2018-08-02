@@ -198,6 +198,7 @@ struct ci_device {
 
 	struct dvb_device	*regdev_ci;
 	struct mutex		ci_mutex;
+	spinlock_t 		ci_lock;
 
 	struct ep_info		ep_isoc_in;	/* isochronous */
 	struct ep_info		ep_isoc_out;	/* isochronous */
