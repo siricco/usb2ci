@@ -241,14 +241,11 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 		   scheduled 1 micro-frame after iso-in.
 		*/
 		urb->transfer_flags		= 0;
-
 		if (use_dma_coherent) {
 			urb->transfer_flags	|= URB_NO_TRANSFER_DMA_MAP;
 			urb->transfer_dma	= xfer->dma_addr;
 		}
-		else
-			urb->transfer_buffer	= xfer->xfer_buffer;
-
+		urb->transfer_buffer		= xfer->xfer_buffer;
 		urb->number_of_packets		= isoc->num_uframes;
 		urb->transfer_buffer_length 	= isoc->transfer_size;
 
