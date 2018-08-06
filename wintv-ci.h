@@ -198,7 +198,6 @@ struct ci_device {
 
 	struct dvb_device	*regdev_ci;
 	struct mutex		ci_mutex;
-	spinlock_t 		ci_lock;
 
 	struct ep_info		ep_isoc_in;	/* isochronous */
 	struct ep_info		ep_isoc_out;	/* isochronous */
@@ -207,8 +206,7 @@ struct ci_device {
 	int			isoc_urbs_running;	/* #of urbs running */
 	wait_queue_head_t	isoc_urbs_wq;		/* urb wait-queue */
 
-	int		ts_count_total;
-	int		ts_count_interval;
+	int		ts_count;
 	unsigned long	ts_count_timeout;
 
 	/* packets write/read */

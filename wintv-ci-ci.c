@@ -31,7 +31,6 @@
 #include <linux/module.h>
 #include <linux/wait.h>
 #include <linux/poll.h>
-#include <linux/spinlock.h>
 
 #define TS_PACKET_SIZE		188
 
@@ -464,8 +463,6 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	int cf, nf, ff = 0;
 	int rc, more = 0;
 
-	unsigned long flags = 0;
-
 	if (left % TS_PACKET_SIZE)
 		pr_warn("%s : TS-packets with %zu trailing bytes\n", __func__, left % TS_PACKET_SIZE);
 
@@ -500,8 +497,6 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 			nf = usb_get_current_frame_number(ci_dev->wintvci->udev);
 			ff++;
 		} while (nf > -1 && nf == cf); // loops many 100 times !
-
-		spin_lock_irqsave(&ci_dev->ci_lock, flags);
 	}
 
 	/* submit out-urb - at first */
@@ -517,9 +512,6 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 		pr_warn("%s : Could not submit TS-IN URB[%d]: (%d)\n",
 						__func__, urb_index, rc);
 	ci_dev->isoc_urbs_running++;
-
-	if (!urb_index)
-		spin_unlock_irqrestore(&ci_dev->ci_lock, flags);
 
 	if (urb_out->start_frame != urb_in->start_frame)
 		pr_warn("%s : diff. start_frames: out/in: %d/%d",
@@ -603,16 +595,16 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 #define TS_COUNT_TIMEOUT (HZ * 10) /* secs */
 	if (show_ts_bitrate) {
 		unsigned long timer_now = jiffies;
-		ci_dev->ts_count_interval += written; /* FIXME - handle overflow */
+		ci_dev->ts_count += written; /* FIXME - handle overflow */
 
 		if (ci_dev->ts_count_timeout <= timer_now) {
 			int time = timer_now - ci_dev->ts_count_timeout + TS_COUNT_TIMEOUT;
-			int mbitx100 = ci_dev->ts_count_interval/time*HZ*8; /* bits/second */
+			int mbitx100 = ci_dev->ts_count/time*HZ*8; /* bits/second */
 			mbitx100 /= (1000*1000/100);
 
 			pr_info("     +++ TS-BITRATE : %d.%02d Mbit/s\n", mbitx100/100,mbitx100 % 100);
 			ci_dev->ts_count_timeout = timer_now + TS_COUNT_TIMEOUT;
-			ci_dev->ts_count_interval = 0;
+			ci_dev->ts_count = 0;
 		}
 	}
 
@@ -702,8 +694,7 @@ void ci_reset(struct wintv_ci_dev *wintvci)
 	ci_dev->isoc_bytes_RB = 0;
 	ci_dev->isoc_bytes_CAM = 0;
 
-	ci_dev->ts_count_total = 0;
-	ci_dev->ts_count_interval = 0;
+	ci_dev->ts_count = 0;
 	ci_dev->ts_count_timeout = jiffies + TS_COUNT_TIMEOUT;
 }
 
@@ -735,7 +726,6 @@ int ci_attach(struct wintv_ci_dev *wintvci)
 	init_waitqueue_head(&ci_dev->ep_isoc_out.erb.wq);
 
 	mutex_init(&ci_dev->ci_mutex);
-	spin_lock_init(&ci_dev->ci_lock);
 
 	ci_isoc_init(ci_dev);
 
