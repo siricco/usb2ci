@@ -105,6 +105,8 @@ struct isoc_info {
 	int			uframe_size;	/* maxp */
 	int 			num_uframes;	/* 1..255 */
 	int			transfer_size;
+	int			min_chunk_size;
+	int			min_submit_size;
 	int			num_transfers;	/* 1.. */
 	struct urb_transfer	*transfers;	/* <= num_transfers */
 };
@@ -198,6 +200,7 @@ struct ci_device {
 
 	struct dvb_device	*regdev_ci;
 	struct mutex		ci_mutex;
+	spinlock_t 		ci_lock;
 
 	struct ep_info		ep_isoc_in;	/* isochronous */
 	struct ep_info		ep_isoc_out;	/* isochronous */
@@ -206,12 +209,12 @@ struct ci_device {
 	int			isoc_urbs_running;	/* #of urbs running */
 	wait_queue_head_t	isoc_urbs_wq;		/* urb wait-queue */
 
+	/* packets write/read observing */
+	int		cam_subs;
+	int		cam_uframes;
 	int		ts_count;
 	unsigned long	ts_count_timeout;
-
-	/* packets write/read */
-	int		isoc_bytes_RB;
-	int		isoc_bytes_CAM;
+	int		isoc_TS_CAM;
 };
 
 #define FW_STATE_COLD  1 /* no firmware loaded */

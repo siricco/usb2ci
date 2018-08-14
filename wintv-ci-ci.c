@@ -34,11 +34,14 @@
 
 #define TS_PACKET_SIZE		188
 
-#define ISOC_MAX_TRANSFER	16
-#define ISOC_MAX_UFRAMES	240
+#define ISOC_MAX_TRANSFERS	16
+#define ISOC_MAX_UFRAMES	240 /* 30 ms | frames */
 
-#define ISOC_NUM_TRANSFER	8
-#define ISOC_NUM_UFRAMES	120
+#define ISOC_NUM_TRANSFERS	8
+#define ISOC_NUM_UFRAMES	120 /* 15 ms | frames */
+
+#define ISOC_MIN_CHUNK_UF	8 /* transmit only in chunks of 8 micro-frames (1 full frame) */
+#define ISOC_MIN_SUBMIT_UF	ISOC_MIN_CHUNK_UF /* the minimum of data to start a URB submission to the CAM */
 
 /* a lot of TS in/out massages */
 #define DEBUG_TS_IO 0
@@ -138,7 +141,8 @@ static void ci_isoc_free(struct ep_info *ep)
 
 static int ci_isoc_allocate(struct ep_info *ep,
 				int num_transfers,
-				int num_uframes)
+				int num_uframes,
+				int min_submit_uf)
 {
 	struct isoc_info *isoc	= &ep->u.isoc;
 	int uframe_size		= ep->maxp;
@@ -153,6 +157,8 @@ static int ci_isoc_allocate(struct ep_info *ep,
 	isoc->uframe_size	= uframe_size;
 	isoc->num_uframes	= num_uframes;
 	isoc->transfer_size	= num_uframes * uframe_size;
+	isoc->min_chunk_size	= ISOC_MIN_CHUNK_UF * uframe_size;
+	isoc->min_submit_size	= min_submit_uf * uframe_size;
 
 	isoc->num_transfers	= 0;
 	isoc->transfers 	= ci_kmalloc(num_transfers *
@@ -237,9 +243,10 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 		   scheduled EXACTLY to the first micro-frame at SOF otherwise
 		   interrupt-in urbs are not responding anymore!
 		   With URB_ISO_ASAP the iso-in is randomly
-		   scheduled 1 micro-frame after iso-in.
+		   scheduled 1 micro-frame after iso-out.
 		*/
 		urb->transfer_flags		= 0;
+
 		if (use_dma_coherent) {
 			urb->transfer_flags	|= URB_NO_TRANSFER_DMA_MAP;
 			urb->transfer_dma	= xfer->dma_addr;
@@ -274,26 +281,32 @@ static int ci_isoc_init(struct ci_device *ci_dev)
 {
 	struct usb_device *udev = ci_dev->wintvci->udev;
 	struct ep_info *ep;
-	int num_transfers = ISOC_NUM_TRANSFER;
+	int num_transfers = ISOC_NUM_TRANSFERS;
 	int num_uframes   = ISOC_NUM_UFRAMES;
+	int min_submit_uf = MAX(ISOC_MIN_SUBMIT_UF, ISOC_MIN_CHUNK_UF);
 	int rc;
 
-	if (num_transfers > ISOC_MAX_TRANSFER) {
+	if (num_transfers > ISOC_MAX_TRANSFERS) {
 		pr_err("%s : limit num_transfers to %d\n",
-					__func__, ISOC_MAX_TRANSFER);
-		num_transfers = ISOC_MAX_TRANSFER;
+					__func__, ISOC_MAX_TRANSFERS);
+		num_transfers = ISOC_MAX_TRANSFERS;
 	}
 	if (num_uframes > ISOC_MAX_UFRAMES) {
 		pr_err("%s : limit num_uframes to %d\n",
 					__func__, ISOC_MAX_UFRAMES);
 		num_uframes = ISOC_MAX_UFRAMES;
 	}
+	if (min_submit_uf > num_uframes) {
+		pr_err("%s : limit num_uframes to %d\n",
+					__func__, num_uframes);
+		min_submit_uf = num_uframes;
+	}
 
 	ep = &ci_dev->ep_isoc_out;
 	rc = ts_rb_alloc(ep, num_transfers, num_uframes);
 	if (rc)
 		return rc;
-	rc = ci_isoc_allocate(ep, num_transfers, num_uframes);
+	rc = ci_isoc_allocate(ep, num_transfers, num_uframes, min_submit_uf);
 	if (rc)
 		return rc;
 	ci_isoc_setup(ep, udev);
@@ -302,7 +315,7 @@ static int ci_isoc_init(struct ci_device *ci_dev)
 	rc = ts_rb_alloc(ep, num_transfers, num_uframes);
 	if (rc)
 		return rc;
-	rc = ci_isoc_allocate(ep, num_transfers, num_uframes);
+	rc = ci_isoc_allocate(ep, num_transfers, num_uframes, min_submit_uf);
 	if (rc)
 		return rc;
 	ci_isoc_setup(ep, udev);
@@ -376,29 +389,24 @@ void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 		num_uframes++;
 	}
 	if (num_uframes) {
-		ci_dev->isoc_bytes_CAM	-= act_size;
+		ci_dev->isoc_TS_CAM -= act_size / TS_PACKET_SIZE;
 
-		if (ci_dev->isoc_bytes_CAM < 0) {
+		if (ci_dev->isoc_TS_CAM < 0) {
 			pr_err("%s :  paket-count underrun (%d)\n",
-					__func__, ci_dev->isoc_bytes_CAM);
-			print_hex_dump(KERN_DEBUG, " CAM-PRE : ", DUMP_PREFIX_OFFSET, 16, 1,
-						b, act_size, 1);
-			ci_dev->isoc_bytes_CAM = 0;
+					__func__, ci_dev->isoc_TS_CAM);
 		}
 #if DEBUG_TS_IO
-		pr_info("%s : --- %d x TS, %2d uframes - rb-avail(%zu) CAM(%d) sframe %d\n",
+		pr_info("%s : --- %d x TS, %2d uframes - rb-avail(%zu) CAM(%+d)\n",
 				__func__, act_size / TS_PACKET_SIZE, num_uframes,
-				dvb_ringbuffer_avail(rb)/TS_PACKET_SIZE,
-				ci_dev->isoc_bytes_CAM/TS_PACKET_SIZE,
-				urb->start_frame);
+				dvb_ringbuffer_avail(rb)/TS_PACKET_SIZE, ci_dev->isoc_TS_CAM);
 #endif
 		wake_up_interruptible(&ep_in->erb.wq); /* ep-in waitqueue RB --> HOST*/
 	}
 	ci_dev->isoc_urbs_running--;
 	wake_up_interruptible(&ci_dev->isoc_urbs_wq); /* urb waitqueue */
 #if DEBUG_TS_IO
-	pr_info("%s : urb submission #%d suspended, sframe %d\n",
-			__func__, ci_dev->isoc_urbs_running, urb->start_frame);
+	pr_info("%s : end frame: %d, running URBs: %d\n",
+			__func__, urb->start_frame, ci_dev->isoc_urbs_running);
 #endif
 	return;
 }
@@ -411,8 +419,8 @@ void ts_write_CAM_complete(struct urb *urb)
 	ci_dev->isoc_urbs_running--;
 	wake_up_interruptible(&ci_dev->isoc_urbs_wq); /* urb waitqueue */
 #if DEBUG_TS_IO
-	if (!ci_dev->isoc_urbs_running) // last urb
-		pr_info("%s : ISOC write end - sframe %d\n", __func__, urb->start_frame);
+	pr_info("%s : end frame: %d, running URBs: %d\n",
+			__func__, urb->start_frame, ci_dev->isoc_urbs_running);
 #endif
 	return;
 }
@@ -433,7 +441,7 @@ void ts_urb_complete(struct urb *urb)
 			pr_err("KILL[%X] %d\n", ep->addr, urb->status);
 			return;
 		default:        /* error */
-			pr_err("%s : EP(%02X) urb completition failed=%d\n",
+			pr_err("%s : EP(%02X) urb completion failed=%d\n",
 					__func__, ep->addr, urb->status);
 			break;
 		}
@@ -444,10 +452,6 @@ void ts_urb_complete(struct urb *urb)
 		ts_write_CAM_complete(urb); /* TS-OUT ringbuffer --> CAM */
 }
 
-/* write a multiple of a full frame (8 micro-frames) */
-#define NUF 8
-#define TS_MIN_UF(u) (u * NUF)
-
 static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringbuffer --> CAM */
 {
 	struct ep_info *ep_out		= &ci_dev->ep_isoc_out;
@@ -455,25 +459,26 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	struct urb *urb_out, *urb_in;
 
 	int uframe_size			= ep_out->u.isoc.uframe_size;
-	int frame_bufsize		= ep_out->u.isoc.transfer_size;
+	int frames_bufsize		= ep_out->u.isoc.transfer_size;
 	int num_uframes;
 
 	size_t rb_avail			= dvb_ringbuffer_avail(&ep_out->erb.buffer);
-	size_t left			= MIN(frame_bufsize, rb_avail);
-	int cf, nf, ff = 0;
+	size_t left			= MIN(frames_bufsize, rb_avail);
 	int rc, more = 0;
+
+	unsigned long lock_flags;
 
 	if (left % TS_PACKET_SIZE)
 		pr_warn("%s : TS-packets with %zu trailing bytes\n", __func__, left % TS_PACKET_SIZE);
+
+	if (left < ep_out->u.isoc.min_submit_size)
+		return 0;
 
 	/* write only full micro-frames or reader returns undefined data up to uframe-size ! */
 	/* write only full frames or interrupt urbs (ca-device) are blocked ! */
 	/* start the urbs exactly at a SOF or interrupt urbs (ca-device) are blocked ! */
 	/* 1 full frame -> 8 uframes * 4*188=752 = 6016 bytes per frame (1ms) ==> max.~48 Mbit/s */
-
-	left -= left % TS_MIN_UF(uframe_size);
-	if (!left)
-		return 0;
+	left -= left % ep_out->u.isoc.min_chunk_size;
 
 	/* we have enough TS-data */
 	urb_out		= ep_out->u.isoc.transfers[urb_index].urb;
@@ -485,20 +490,25 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 	urb_in->number_of_packets = num_uframes;
 	dvb_ringbuffer_read(&ep_out->erb.buffer, urb_out->transfer_buffer, left);
 
-	more = ((rb_avail - left) >= TS_MIN_UF(uframe_size)); /* we can send more urbs */
-	ci_dev->isoc_bytes_CAM += left;
+	more = ((rb_avail - left) >= ep_out->u.isoc.min_submit_size); /* we can send more urbs */
+	ci_dev->cam_uframes += num_uframes;
+	ci_dev->isoc_TS_CAM += left / TS_PACKET_SIZE;
 
-	/* +++IMPORTANT++ align the first urb transfers to SOF ! */
+	/* +++IMPORTANT+++ align the first urb transfers to SOF ! */
 	/* it seems, there is currently no way to set the urb start_frame */
 
-	if (!urb_index) {
+	if (!urb_index) { /* start of transmission */
+		int cf, nf, ff = 0;
+		ci_dev->cam_subs++;
+		/* lock the whole submission sequence - all within 0.125ms including the detection of SOF */
+		spin_lock_irqsave(&ci_dev->ci_lock, lock_flags);
+
 		cf = usb_get_current_frame_number(ci_dev->wintvci->udev);
 		do {
 			nf = usb_get_current_frame_number(ci_dev->wintvci->udev);
 			ff++;
 		} while (nf > -1 && nf == cf); // loops many 100 times !
 	}
-
 	/* submit out-urb - at first */
 	rc = usb_submit_urb(urb_out, GFP_ATOMIC);
 	if (rc < 0)
@@ -512,16 +522,16 @@ static int ts_write_CAM(struct ci_device *ci_dev, int urb_index)	/* TS-OUT ringb
 		pr_warn("%s : Could not submit TS-IN URB[%d]: (%d)\n",
 						__func__, urb_index, rc);
 	ci_dev->isoc_urbs_running++;
+	if (!urb_index)
+		spin_unlock_irqrestore(&ci_dev->ci_lock, lock_flags);
 
 	if (urb_out->start_frame != urb_in->start_frame)
-		pr_warn("%s : diff. start_frames: out/in: %d/%d",
-				__func__, urb_out->start_frame, urb_in->start_frame);
+		pr_err("%s[%d] : diff. start_frames: out/in: %d/%d\n",
+				__func__, urb_index, urb_out->start_frame, urb_in->start_frame);
 #if DEBUG_TS_IO
-	pr_info("%s : --- %zu x TS, %2d uframes - rb-avail(%zu) CAM(%d) ff:%d\n",
-				__func__, left / TS_PACKET_SIZE,
-				num_uframes, rb_avail/TS_PACKET_SIZE,
-				ci_dev->isoc_bytes_CAM/TS_PACKET_SIZE,
-				ff);
+	pr_info("%s : --- %zu x TS, %2d uframes - rb-avail(%zu) CAM(%+d)\n",
+				__func__, left / TS_PACKET_SIZE, num_uframes,
+				rb_avail/TS_PACKET_SIZE, ci_dev->isoc_TS_CAM);
 #endif
 	return more;
 }
@@ -542,19 +552,16 @@ static void ts_CAM_exchange(struct ci_device *ci_dev)
 				!ci_dev->isoc_urbs_running) < 0)
 			return;
 
-	/* short delay before submitting first urb */
-#define URB_DELAY 5000
-	usleep_range(URB_DELAY, URB_DELAY+1);
+	if (ci_dev->isoc_TS_CAM) {
+		pr_warn("%s : TS CAM-IO: %+d", __func__, ci_dev->isoc_TS_CAM);
+		ci_dev->isoc_TS_CAM = 0;
+	}
 
 	for (i = 0; i < isoc->num_transfers; i++) {
 		more = ts_write_CAM(ci_dev, i);
 		if (!more)
 			break;
 	}
-#if DEBUG_TS_IO
-	if (i++)
-	    pr_info("%s :  %d urb transfers", __func__, i); // shows 4 .. 6 Mbit/s within 1 transfer
-#endif
 }
 
 static ssize_t ts_write(struct file *file, const __user char *buf,
@@ -574,41 +581,48 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 	ci_dev->isoc_enabled = 1;
 
 	if (!rb_free)
-		pr_err("     *** TS-write : ringbuffer overrun\n");
+		pr_err("%s : *** ringbuffer overrun\n", __func__);
 
 	if (todo % TS_PACKET_SIZE)
-		pr_info("%s : TS-packets with %zu trailing bytes(count %zu, free %zu)\n",
+		pr_warn("%s : TS-packets with %zu trailing bytes(count %zu, free %zu)\n",
 				__func__, todo % TS_PACKET_SIZE, count, rb_free);
 
 	if (todo) {
 		/* copy_from_user */
 		written = dvb_ringbuffer_write_user(rb, buf, todo);
 		if (written != todo)
-			pr_err("     *** TS-write error written(%zu) != want(%zu)\n",
-								written, todo);
-		ci_dev->isoc_bytes_RB += written; /* ringbuffer write-read diff. */
+			pr_err("%s : *** written(%zu) != want(%zu)\n",
+						__func__, written, todo);
 #if DEBUG_TS_IO
-		pr_info("     *** TS-write{%02X} (%zu)[%zu]<%zu> - rb(%d)\n", (u8) buf[0], count,
-					todo, todo/TS_PACKET_SIZE, ci_dev->isoc_bytes_RB/TS_PACKET_SIZE);
+		pr_info("%s : *** TS{%02X} (%zu)[%zu]<%zu>\n", __func__,
+				(u8) buf[0], count, todo, todo/TS_PACKET_SIZE);
 #endif
 	}
-#define TS_COUNT_TIMEOUT (HZ * 10) /* secs */
+#define TS_COUNT_TIME    10 /* secs */
+#define TS_COUNT_TIMEOUT (HZ * TS_COUNT_TIME)
 	if (show_ts_bitrate) {
 		unsigned long timer_now = jiffies;
 		ci_dev->ts_count += written; /* FIXME - handle overflow */
 
-		if (ci_dev->ts_count_timeout <= timer_now) {
+		if (ci_dev->ts_count_timeout <= timer_now ) {
 			int time = timer_now - ci_dev->ts_count_timeout + TS_COUNT_TIMEOUT;
-			int mbitx100 = ci_dev->ts_count/time*HZ*8; /* bits/second */
-			mbitx100 /= (1000*1000/100);
+			int scam100 = ci_dev->cam_subs * 100 * HZ / time;
+			int uf100 = (!ci_dev->cam_subs) ? 0 :
+				ci_dev->cam_uframes * 10000 / (ISOC_NUM_TRANSFERS * ISOC_NUM_UFRAMES * ci_dev->cam_subs);
+			int mbitx100 = ci_dev->ts_count / time * HZ * 8; /* bits/second */
+			mbitx100 /= (1000 * 1000 / 100);
 
-			pr_info("     +++ TS-BITRATE : %d.%02d Mbit/s\n", mbitx100/100,mbitx100 % 100);
+			pr_info("     +++ TS-BITRATE : %d.%02d Mbit/s, %d.%02d CAM-subs/s, URB-load: %d.%02d %%\n",
+				mbitx100 / 100,mbitx100 % 100, scam100 / 100, scam100 % 100, uf100/100, uf100 % 100);
+
+			ci_dev->cam_subs = 0;
+			ci_dev->cam_uframes = 0;
 			ci_dev->ts_count_timeout = timer_now + TS_COUNT_TIMEOUT;
 			ci_dev->ts_count = 0;
 		}
 	}
 
-	if (written)
+	if (dvb_ringbuffer_avail(rb) >= ep->u.isoc.min_submit_size)
 		ts_CAM_exchange(ci_dev);
 
 	return written;
@@ -632,12 +646,11 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 		/* copy_to_user */
 		read = dvb_ringbuffer_read_user(rb, buf, avail);
 		if (read != avail)
-			pr_err("     *** TS-read error read(%zu) != want(%zu)\n",
-								read, avail);
-		ci_dev->isoc_bytes_RB -= read; /* ringbuffer read-write diff */
+			pr_err("%s : *** read(%zu) != want(%zu)\n",
+						__func__, read, avail);
 #if DEBUG_TS_IO
-		pr_info("     *** TS-read{%02X} (%zu)[%zu]<%zu> - rb(%d)\n", (u8) buf[0], count,
-					read, read/TS_PACKET_SIZE, ci_dev->isoc_bytes_RB/TS_PACKET_SIZE);
+		pr_info("%s : *** TS{%02X} (%zu)[%zu]<%zu>\n", __func__,
+				(u8) buf[0], count, read, read/TS_PACKET_SIZE);
 #endif
 	}
 	return read;
@@ -691,11 +704,11 @@ void ci_reset(struct wintv_ci_dev *wintvci)
 
 	ts_stop_streaming(ci_dev);
 
-	ci_dev->isoc_bytes_RB = 0;
-	ci_dev->isoc_bytes_CAM = 0;
-
+	ci_dev->cam_subs = 0;
+	ci_dev->cam_uframes = 0;
 	ci_dev->ts_count = 0;
 	ci_dev->ts_count_timeout = jiffies + TS_COUNT_TIMEOUT;
+	ci_dev->isoc_TS_CAM = 0;
 }
 
 void ci_detach(struct wintv_ci_dev *wintvci)
@@ -726,6 +739,7 @@ int ci_attach(struct wintv_ci_dev *wintvci)
 	init_waitqueue_head(&ci_dev->ep_isoc_out.erb.wq);
 
 	mutex_init(&ci_dev->ci_mutex);
+	spin_lock_init(&ci_dev->ci_lock);
 
 	ci_isoc_init(ci_dev);
 
