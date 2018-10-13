@@ -2,5 +2,7 @@
 
 modprobe -r wintv-usb2ci
 
-make -C /lib/modules/$(uname -r)/build M=$PWD modules
-make -C /lib/modules/$(uname -r)/build M=$PWD modules_install
+make -C /lib/modules/$(uname -r)/build M=$PWD modules && \
+make -C /lib/modules/$(uname -r)/build M=$PWD modules_install && \
+\
+modprobe wintv-usb2ci
