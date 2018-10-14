@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2017 Helmut Binder (cco@aon.at)
  #
- * (+HB+) 2017-08-13 
+ * (+HB+) 2017-08-13
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -35,7 +35,7 @@
 #include "media/dvb_ringbuffer.h"
 #endif
 
-#include <linux/dvb/ca.h> // CI_CA_LINK,...
+#include <linux/dvb/ca.h> /* CI_CA_LINK,... */
 
 #define MIN(a,b) (((a)<=(b)) ? (a) : (b))
 #define MAX(a,b) (((a)>=(b)) ? (a) : (b))
@@ -107,8 +107,12 @@ struct isoc_info {
 	int			transfer_size;
 	int			min_chunk_size;
 	int			min_submit_size;
+
+	int			num_urbs;	/* all urbs */
+	struct urb_transfer	*urbs;
+
 	int			num_transfers;	/* 1.. */
-	struct urb_transfer	*transfers;	/* <= num_transfers */
+	struct urb_transfer	*transfers;	/* TS transfers */
 };
 
 struct ca_cmd_sndhd {
@@ -178,6 +182,8 @@ struct task {
 	unsigned int		wakeup:1;
 	/* Delay the main thread should use */
 	unsigned long		delay;
+	/* running or stopped */
+	int			running;
 };
 
 struct ca_device {
@@ -192,7 +198,7 @@ struct ca_device {
 
 	struct task		ca_task;
 
-	int		ca_cam_state;
+	int			ca_cam_state;
 };
 
 struct ci_device {
@@ -201,6 +207,7 @@ struct ci_device {
 	struct dvb_device	*regdev_ci;
 	struct mutex		ci_mutex;
 	spinlock_t 		ci_lock;
+	unsigned long		ci_lock_flags;
 
 	struct ep_info		ep_isoc_in;	/* isochronous */
 	struct ep_info		ep_isoc_out;	/* isochronous */
@@ -215,6 +222,7 @@ struct ci_device {
 	int		ts_count;
 	unsigned long	ts_count_timeout;
 	int		isoc_TS_CAM;
+	int		isoc_TS_CAM_total;
 };
 
 #define FW_STATE_COLD  1 /* no firmware loaded */
@@ -282,7 +290,6 @@ void dump_io_tpdu( u8 *buf, size_t count, const char *func, int dir_in);
 /*
  * --- C A - D E V I C E  ( T P D U )
  */
-//void rb_read_tpdu(struct wintv_ci_dev *wintvci);
 
 int  ca_attach(struct wintv_ci_dev *wintvci);
 void ca_detach(struct wintv_ci_dev *wintvci);

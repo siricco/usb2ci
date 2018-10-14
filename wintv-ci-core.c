@@ -3,8 +3,9 @@
  *
  * Copyright (C) 2017 Helmut Binder (cco@aon.at)
  #
- * (+HB+) 2017-08-13 
+ * (+HB+) 2017-08-13
  * (+HB+) 2017-09-18 first descrambling
+ * (+HB+) 2018-10-13 Version 0.3
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -90,7 +91,7 @@ static int ezusb_ctrl_write(struct wintv_ci_dev *wintvci,
 	if (request == VR_A2_EEPROM) {
 		pr_warn("Writing to EEPROM can brick the device and \
 			therefore blocked by driver!\n");
-		return(0); /* true */
+		return 0;
 	}
 
 	/* move data (possibly) out of stack -> kernel 4.13.3 */
@@ -102,8 +103,7 @@ static int ezusb_ctrl_write(struct wintv_ci_dev *wintvci,
 				USB_DIR_OUT | USB_TYPE_VENDOR | USB_RECIP_DEVICE,
 				address, 0, wintvci->ep0_buffer, length,
 				USB_CTL_TIMEOUT);
-
-	return (rc);
+	return rc;
 }
 
 static int ezusb_ctrl_read(struct wintv_ci_dev *wintvci,
@@ -126,8 +126,7 @@ static int ezusb_ctrl_read(struct wintv_ci_dev *wintvci,
 				USB_CTL_TIMEOUT);
 	if (rc == length)
 		memcpy(data, wintvci->ep0_buffer, length);
-
-	return (rc);
+	return rc;
 }
 
 static int ezusb_cpucs_reset(struct wintv_ci_dev *wintvci,
@@ -135,10 +134,8 @@ static int ezusb_cpucs_reset(struct wintv_ci_dev *wintvci,
 {
 	int rc;
 
-	rc = ezusb_ctrl_write(wintvci, VR_A0_INTRAM, cpucs_reg, &stop_bit, 1);
-
 	//pr_info("%s - %s\n",__func__, (stop_bit) ? "STOP" : "START");
-
+	rc = ezusb_ctrl_write(wintvci, VR_A0_INTRAM, cpucs_reg, &stop_bit, 1);
 	if (rc != 1)
 		pr_err("%s(%d) failed: %d\n",__func__, stop_bit, rc);
 
@@ -147,6 +144,17 @@ static int ezusb_cpucs_reset(struct wintv_ci_dev *wintvci,
 
 #define EZ_CPU_STOP(u,fx)  ezusb_cpucs_reset(u, fx->cpucs_reg, 1)
 #define EZ_CPU_START(u,fx) ezusb_cpucs_reset(u, fx->cpucs_reg, 0)
+
+static int usb_ctrl_req_set_config(struct wintv_ci_dev *wintvci, int cfg)
+{
+	int rc = usb_control_msg(wintvci->udev,
+				usb_sndctrlpipe(wintvci->udev, USB_EP0_ADDR),
+				USB_REQ_SET_CONFIGURATION,
+				USB_DIR_OUT | USB_RECIP_DEVICE,
+				cfg, 0, NULL, 0,
+				USB_CTL_TIMEOUT);
+	return rc;
+}
 
 /*
  *  W I N T V - C I   C O M M A N D S
@@ -299,7 +307,7 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 			if (rc)
 				return CI_ERR_E0_USB;		/* USB error */
 			else if (intr->pkt.hdr->reply & CI_ERR_ERROR_MASK)
-				return(intr->pkt.hdr->reply);	/* CMD error */
+				return intr->pkt.hdr->reply;	/* CMD error */
 			else
 				continue; /* ignore reply from allready timedout cmd */
 		}
@@ -334,11 +342,9 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 		print_hex_dump(KERN_DEBUG, " CI_read_CMD : ",
 					DUMP_PREFIX_OFFSET, 16, 1,
 					msg_ptr - msg_len, msg_len, 1);
-
 	return 0;
 }
 
-//static 
 int cam_state_set(struct wintv_ci_dev *wintvci, int usbci_state)
 {
 	if (!usbci_state || wintvci->slot.usbci_state == usbci_state)
@@ -405,6 +411,7 @@ static int CI_WriteExchange(struct wintv_ci_dev *wintvci, u8 CI_CMD,
 						rc, data_len, CI_CMD_S);
 		goto done;
 	}
+
 	rc = CI_read_CMD_REPLY(wintvci, CI_CMD_R, reply, debug);
 	t_response = jiffies_to_msecs(jiffies - t_start);
 
@@ -424,7 +431,6 @@ done:
 		cam_state_set(wintvci, USBCI_STATE_NON);
 
 	mutex_unlock(&wintvci->usb_mutex);
-
 	return rc;
 }
 
@@ -435,13 +441,13 @@ static int CI_10_HwReset(struct wintv_ci_dev *wintvci)
 	char buf[1] = { 0xF }; /* FW-Ver. 3 and 4 (?) */
 
 	int rc = CI_WriteExchange(wintvci, CI_10_HW_RESET, NULL, buf, sizeof buf);
-	return(rc);
+	return rc;
 }
 
 int CI_20_WriteLPDU(struct wintv_ci_dev *wintvci, char *data, int len)
 {
 	int rc = CI_WriteExchange(wintvci, CI_20_LPDU_WRITE, NULL, data, len);
-	return(rc);
+	return rc;
 }
 
 static int CI_40_GetCIS(struct wintv_ci_dev *wintvci)
@@ -451,7 +457,7 @@ static int CI_40_GetCIS(struct wintv_ci_dev *wintvci)
 	int rc = CI_WriteExchange(wintvci, CI_40_GET_CIS, &reply, NULL, 0);
 	if(!rc)
 		rc = parse_cis(reply.buffer, reply.size, &wintvci->slot);
-	return(rc);
+	return rc;
 }
 
 #define DGB_STATUS 0
@@ -475,11 +481,11 @@ int CI_50_GetStatus(struct wintv_ci_dev *wintvci, unsigned char *status)
 	else
 		wintvci->last_status_cnt++;
 #endif
-	return(rc);
+	return rc;
 }
 #undef DGB_STATUS
 
-static int CI_60_Negotiate(struct wintv_ci_dev *wintvci, 
+static int CI_60_Negotiate(struct wintv_ci_dev *wintvci,
 						unsigned short link_size)
 {
 	struct msg_reply reply;
@@ -497,7 +503,7 @@ static int CI_60_Negotiate(struct wintv_ci_dev *wintvci,
 			pr_info("LINK_LAYER SIZE : %d bytes\n", nego_size);
 		wintvci->slot.link_layer_size = nego_size;
 	}
-	return(rc);
+	return rc;
 }
 
 static int CI_70_WriteCOR(struct wintv_ci_dev *wintvci,
@@ -513,23 +519,22 @@ static int CI_70_WriteCOR(struct wintv_ci_dev *wintvci,
 	buf[4] = 0;
 
 	rc = CI_WriteExchange(wintvci, CI_70_WRITE_COR, NULL, buf, sizeof buf);
-	return(rc);
+	return rc;
 }
 
 int CI_80_ReadLPDU(struct wintv_ci_dev *wintvci, struct msg_reply *reply)
 {
 	int rc = CI_WriteExchange(wintvci, CI_80_LPDU_READ, reply, NULL, 0);
-	return(rc);
+	return rc;
 }
 
 static int CI_90_GetVersion(struct wintv_ci_dev *wintvci,
 						struct msg_reply *reply)
 {
 	int rc = CI_WriteExchange(wintvci, CI_90_GET_VER, reply, NULL, 0);
-	return(rc);
+	return rc;
 }
 
-//static 
 int cam_state_monitor(struct wintv_ci_dev *wintvci)
 {
 	unsigned short link_size;
@@ -580,20 +585,17 @@ int cam_state_monitor(struct wintv_ci_dev *wintvci)
 
 /*** U T I L I T I E S ***/
 
-//static 
 void *ci_kmalloc(int size, int zero, char * caller)
 {
 	unsigned char *buf;
 
-	buf = (zero) ?
-		kzalloc(size, GFP_KERNEL) :
-		kmalloc(size, GFP_KERNEL);
+	buf = (zero)
+		? kzalloc(size, GFP_KERNEL)
+		: kmalloc(size, GFP_KERNEL);
 
-	if (!buf) {
+	if (!buf)
 		pr_err("%s - failed to allocate %d bytes of memory\n",
 							caller, size);
-		return NULL;
-	}
 
 	return buf;
 }
@@ -627,19 +629,14 @@ static int wintv_usb_ci_parse_firmware( const struct firmware *fw,
 	unsigned char block_sizes[] = { 0x46, 0x16 }; /* possible fw block-sizes */
 
 	for (n = 0; n < sizeof(block_sizes); n++) {
-
 		int block_size = block_sizes[n];
 		int num_blocks = fw->size/block_size;
-
 		int ram_min = FW_ADR_TOP;
 		int ram_top = 0;
-
 		const unsigned char *cptr;
 		int i;
 
-		//pr_info("*** FW *** check with blocksize 0x%02X\n",block_size);
-
-		 /* even block-count ? */
+		/* even block-count ? */
 		if (!num_blocks || (fw->size % block_size))
 			continue;
 
@@ -649,7 +646,7 @@ static int wintv_usb_ci_parse_firmware( const struct firmware *fw,
 
 			if (i < num_blocks) {
 				if (	(fwbh->last == 0) &&
-					fwbh->clen && 
+					fwbh->clen &&
 					(fwbh->clen < (block_size-5)) &&
 					(fwbh->cadr <= (FW_ADR_TOP - fwbh->clen))) { /* valid block */
 
@@ -668,7 +665,7 @@ static int wintv_usb_ci_parse_firmware( const struct firmware *fw,
 					*adr_max = ram_top-1;
 					pr_info("*** FW *** block-size %02X, block-cnt %d, RAM address range: 0x%04X - 0x%04X\n",
 							block_size, num_blocks, ram_min, ram_top);
-					return(block_size);
+					return block_size;
 				}
 			}
 			break; /* bad block -> check fw with next block-size */
@@ -677,7 +674,7 @@ static int wintv_usb_ci_parse_firmware( const struct firmware *fw,
 
 	pr_info("*** FW *** Error: Invalid Firmware\n");
 
-	return(0);
+	return 0;
 }
 
 static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
@@ -690,13 +687,13 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 	unsigned char *cptr;
 	int adr_min, adr_max, block_size, num_blocks, blocks_written;
 	int use_ext_ram = 0;
-	int i, rc = 0;
+	int i;
 
-	if (!request_firmware(&fw, fw_name, &udev->dev))
-		pr_info("located firmware %s, size %zu bytes\n",fw_name, fw->size);
-	else
-		return(0);
+	int rc = request_firmware(&fw, fw_name, &udev->dev);
+	if (rc)
+		return rc;
 
+	pr_info("located firmware %s, size %zu bytes\n",fw_name, fw->size);
 	block_size = wintv_usb_ci_parse_firmware(fw, &adr_min, &adr_max);
 	if (!block_size)
 		goto fw_error;
@@ -722,6 +719,7 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 
 			if (fwbh->cadr >= wintvci->info->fx->internal_ram_size) {
 				//pr_info("extram adr 0x%04X, len 0x%X bytes\n",fwbh->cadr, fwbh->clen);
+
 				rc = ezusb_ctrl_write( wintvci,
 					VR_A3_EXTRAM, fwbh->cadr, &fwbh->cdata, fwbh->clen );
 
@@ -752,12 +750,15 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 	EZ_CPU_START(wintvci,wintvci->info->fx);
 
 	pr_info(" * %d firmware blocks written to internal RAM\n", blocks_written);
-	rc = 1;
+
+	kfree(fw_code);
+	release_firmware(fw);
+	return 0;
 wr_error:
 	kfree(fw_code);
 fw_error:
 	release_firmware(fw);
-	return (rc > 0);
+	return -EINVAL;
 }
 
 static void wintv_usb_ci_show_hw_info( struct wintv_ci_dev *wintvci )
@@ -800,6 +801,12 @@ static void wintv_usb_ci_show_hw_info( struct wintv_ci_dev *wintvci )
 				VR_A3_EXTRAM, EZ_REVID, &regval, 1);
 	if (rc == 1) {
 		pr_info(" * REVID [0x%04X]: Silicon Revision 0x%02X\n", EZ_REVID, regval);
+	}
+#define EZ_REVCTL 0xE60B
+	rc = ezusb_ctrl_read( wintvci,
+				VR_A3_EXTRAM, EZ_REVCTL, &regval, 1);
+	if (rc == 1) {
+		pr_info(" * REVCTL [0x%04X]: 0x%02X\n", EZ_REVCTL, regval);
 	}
 #define EZ_IFCONFIG 0xE601
 	rc = ezusb_ctrl_read( wintvci,
@@ -844,6 +851,7 @@ static void wintv_usb_ci_show_sw_info( struct wintv_ci_dev *wintvci )
 
 #define CI_USB_INTERFACE  0
 #define CI_USB_ALTSETTING 1
+#define CI_USB_CONFIGURATION 1
 
 static char *name_ep_type[] = { "CTRL","ISOC","BULK","INTR" };
 
@@ -857,15 +865,21 @@ static int wintv_usb_ci_setup_endpoints(struct wintv_ci_dev *wintvci)
 	if (rc < 0) {
 		pr_err(" *ERR* unable to set altsetting[%d] of interface[%d]\n",
 				CI_USB_ALTSETTING, CI_USB_INTERFACE);
-		return(0);
+		return rc;
 	}
 
-	host_intf = wintvci->intf->cur_altsetting;
+	rc = usb_ctrl_req_set_config(wintvci, CI_USB_CONFIGURATION);
+	if (rc < 0) {
+		pr_err(" *ERR* unable to set configuration[%d]\n", CI_USB_CONFIGURATION);
+		return rc;
+	}
+	pr_info(" * current configuration:%d\n", udev->actconfig->desc.bConfigurationValue);
 
+	host_intf = wintvci->intf->cur_altsetting;
 	if (host_intf->desc.bNumEndpoints != 4) {
 		pr_err(" *ERR* expect exact 4 endpoints in altsetting[%d]\n",
 				CI_USB_ALTSETTING);
-		return(0);
+		return -EINVAL;
 	}
 
 	for (i = 0; i < host_intf->desc.bNumEndpoints; i++) {
@@ -903,7 +917,13 @@ static int wintv_usb_ci_setup_endpoints(struct wintv_ci_dev *wintvci)
 		epi->dir		= dir;
 		epi->addr		= addr;
 		epi->pipe		= pipe;
-		 /* no MAXP_MULT in kernels <= 4.8 ? */
+		/*
+		 * max_packet_size for 1 micro-frame(0.125ms) - 8 uframea -> 1. frame (1ms)
+		 * Hw.Rev.1 : 5*188=940 = 7520 bytes per frame (1ms) ==> max.~60 Mbit/s
+		 * Hw.Rev.2 : 4*188=752 = 6016 bytes per frame (1ms) ==> max.~48 Mbit/s
+		 *
+		 * no MAXP_MULT in kernels <= 4.8 ?
+		 */
 		epi->maxp		= __le16_to_cpu(epd->wMaxPacketSize) & 0x7FF;
 		epi->maxp		*= ((__le16_to_cpu(epd->wMaxPacketSize) >> 11) & 0x3) + 1;
 		epi->binterval		= epd->bInterval;
@@ -921,21 +941,20 @@ static int wintv_usb_ci_setup_endpoints(struct wintv_ci_dev *wintvci)
 		!wintvci->ci_dev.ep_isoc_out.addr ) {
 
 		pr_info(" *ERR* not all expected endpoints found\n");
-		return(0);
+		return -EINVAL;
 	}
 	if (	(wintvci->ca_dev.ep_intr_in.maxp < CA_CTRL_MAXPKT) ||
 		(wintvci->ca_dev.ep_bulk_out.maxp < CA_CTRL_MAXPKT) ) {
 		pr_info(" *ERR* invalid packet-size in control-interface(s)\n");
-		return(0);
+		return -EINVAL;
 	}
-
-	/* unblock all endpoints */
+	/* clear all endpoints */
 	usb_clear_halt(udev, wintvci->ca_dev.ep_intr_in.pipe);
 	usb_clear_halt(udev, wintvci->ca_dev.ep_bulk_out.pipe);
 	usb_clear_halt(udev, wintvci->ci_dev.ep_isoc_in.pipe);
 	usb_clear_halt(udev, wintvci->ci_dev.ep_isoc_out.pipe);
 
-	return(1);
+	return 0;
 }
 
 /*
@@ -962,7 +981,7 @@ static int wintv_usb_ci_adapter_attach(struct wintv_ci_dev *wintvci) {
  *  D R I V E R - I N I T
  */
 
-static int wintv_usb_ci_probe(struct usb_interface *intf, 
+static int wintv_usb_ci_probe(struct usb_interface *intf,
 				const struct usb_device_id *id)
 {
 	struct wintv_ci_dev *wintvci;
@@ -972,7 +991,6 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 	struct usb_device *udev = usb_get_dev(interface_to_usbdev(intf));
 	struct usb_id_info *info = (struct usb_id_info *) id->driver_info;
 	u16 hw_version = le16_to_cpu(udev->descriptor.bcdDevice);
-
 	/****/
 	wintvci = ci_kmalloc(sizeof(*wintvci), 1, (char *)__func__);
 	if (!wintvci)
@@ -1013,7 +1031,7 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 		 * and show some hardware-info. No automatic USB-renumbering !
 		 */
 		rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name);
-		if (!rc)
+		if (rc)
 			goto error;
 		wintvci->fw_state = FW_STATE_EZUSB;
 		/*---*/
@@ -1026,7 +1044,7 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 		pr_info("CI-firmware %s selected\n", fw_name);
 
 		rc = wintv_usb_ci_load_firmware(wintvci, fw_name);
-		if (!rc)
+		if (rc)
 			goto error;
 		/* Now the USB-device disconnects and re-appears in warm state */
 	}
@@ -1039,11 +1057,11 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 	/* ------ WARM ------ */
 	if (wintvci->fw_state == FW_STATE_WARM ) {
 		rc = wintv_usb_ci_setup_endpoints(wintvci);
-		if (rc < 0)
+		if (rc)
 			goto error;
 
 		rc = wintv_usb_ci_adapter_attach(wintvci);
-		if (rc < 0)
+		if (rc < 0) /* adapter number */
 			goto error;
 
 		rc = ca_attach(wintvci);
@@ -1127,7 +1145,7 @@ MODULE_DEVICE_TABLE (usb, wintv_usb_ci_table);
 
 MODULE_AUTHOR("Helmut Binder");
 MODULE_DESCRIPTION("Hauppauge WinTV-CI USB2 Common Interface driver");
-MODULE_VERSION("0.2.13");
+MODULE_VERSION("0.3.0");
 MODULE_LICENSE("GPL");
 
 static struct usb_driver wintv_usb_ci_driver = {

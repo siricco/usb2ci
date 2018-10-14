@@ -1,9 +1,9 @@
-/*
+\/*
  * wintv-ci-ca.c : WinTV-CI - USB2 Common Interface driver
  *
  * Copyright (C) 2017 Helmut Binder (cco@aon.at)
  #
- * (+HB+) 2017-08-13 
+ * (+HB+) 2017-08-13
  * (+HB+) 2017-09-18 first descrambling
  *
  * This program is free software; you can redistribute it and/or
@@ -132,7 +132,7 @@ static int ca_intr_bulk_init(struct ca_device *ca_dev)
 	if (rc)
 		return rc;
 
-	return rc;
+	return 0;
 }
 
 /*
@@ -159,6 +159,8 @@ static int ca_thread(void *data)
 
 	/* choose the initial delay */
 	ca_dev->ca_task.delay = HZ * 2; /* 2 sec */
+	ca_dev->ca_task.wakeup = 0;
+	ca_dev->ca_task.running = 1;
 
 	/* main loop */
 	while (!kthread_should_stop()) {
@@ -167,12 +169,13 @@ static int ca_thread(void *data)
 			set_current_state(TASK_INTERRUPTIBLE);
 			schedule_timeout(ca_dev->ca_task.delay);
 			if (kthread_should_stop())
-				return 0;
+				break;
 		}
-
 		ca_dev->ca_task.wakeup = 0;
 		cam_state_monitor(ca_dev->wintvci);
 	}
+	ca_dev->ca_task.running = 0;
+	do_exit(0);
 
 	return 0;
 }
@@ -302,7 +305,7 @@ static int rb_read_tpdu(struct ca_device *ca_dev)	// CAM INTR_IN --> ringbuffer
 
 	buf = ci_kmalloc(CA_CTRL_MAXTPDU, 0, (char *)__func__);
 	if (!buf)
-		return -1;
+		return -ENOMEM;
 
 	size = CA_recv_TPDU(ca_dev, slot, &tcid, buf+2, CA_CTRL_MAXTPDU-2);
 
@@ -685,7 +688,8 @@ void ca_detach(struct wintv_ci_dev *wintvci)
 	pr_info("Detaching DVB CA Device\n");
 
 	/* shutdown the thread if there was one */
-	kthread_stop(ca_dev->ca_task.thread);
+	if (ca_dev->ca_task.running)
+		kthread_stop(ca_dev->ca_task.thread);
 
 	/* de-register ca-device */
 	dvb_unregister_device(ca_dev->regdev_ca);
@@ -731,6 +735,7 @@ int ca_attach(struct wintv_ci_dev *wintvci)
 				__func__, rc);
 		goto unregister;
 	}
+
 	return rc;
 
 unregister:
