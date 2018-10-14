@@ -1,4 +1,4 @@
-\/*
+/*
  * wintv-ci-ca.c : WinTV-CI - USB2 Common Interface driver
  *
  * Copyright (C) 2017 Helmut Binder (cco@aon.at)
