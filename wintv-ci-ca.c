@@ -406,7 +406,7 @@ static int CA_send_TPDU(struct ca_device *ca_dev, u8 slot, u8 tcid,
 		    [1] = more(0x80) | last(0x0)
 		    [2..n] = TPDU-fragment
 		*/
-		size_t frag_size = MIN(todo, CA_LINK_LAYER_DATA);
+		size_t frag_size = min(todo, (size_t)CA_LINK_LAYER_DATA);
 
 		tpdu_frag[1] = (frag_size < todo) ? 0x80 : 0x00;
 		memcpy(tpdu_frag+2, buf+ofs, frag_size);

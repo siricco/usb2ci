@@ -324,6 +324,6 @@ void dump_io_tpdu( u8 *buf, size_t count, const char *func, int dir_in) {
 					tag_num,tag_str);
 
 		print_hex_dump(KERN_DEBUG, " TPDU : ", DUMP_PREFIX_OFFSET, 16, 1,
-						buf+2, MIN(count-2,0x20), 1);
+						buf+2, min(count-2, (size_t)0x20), 1);
 	}
 }

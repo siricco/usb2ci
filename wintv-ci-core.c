@@ -252,7 +252,7 @@ static int CI_send_CMD(struct wintv_ci_dev *wintvci, u8 CI_CMD_S,
 	do {	/* run command at least once */
 		bulk->pkt.hdr->len = rem_size;
 
-		frag_len = MIN(rem_size, CA_CTRL_MAXPKT_DATA);
+		frag_len = min(rem_size, CA_CTRL_MAXPKT_DATA);
 		rem_size -= frag_len;
 
 		memcpy(&bulk->pkt.hdr->data, msg_ptr, frag_len);
@@ -321,7 +321,7 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 			return CI_ERR_10_LPDU_READ;
 		}
 
-		frag_len = MIN(intr->pkt.hdr->len, CA_CTRL_MAXPKT_DATA);
+		frag_len = min(intr->pkt.hdr->len, (unsigned char)CA_CTRL_MAXPKT_DATA);
 		rem_size = intr->pkt.hdr->len - frag_len;
 
 		memcpy(msg_ptr, &intr->pkt.hdr->data, frag_len);

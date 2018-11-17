@@ -211,7 +211,7 @@ static int ci_isoc_allocate(struct ep_info *ep,
 	isoc->num_urbs		= 0;
 	isoc->num_transfers	= 0;
 
-	isoc->urbs		= ci_kmalloc(num_transfers * sizeof(*isoc->urbs),
+	isoc->urbs		= ci_kmalloc(num_urbs * sizeof(*isoc->urbs),
 						1, (char *)__func__);
 	if (!isoc->urbs)
 		return -ENOMEM;
@@ -371,9 +371,9 @@ static int ci_isoc_init(struct ci_device *ci_dev)
 	struct ep_info *ep;
 	int rc;
 
-	int num_transfers	= MIN(ISOC_NUM_TRANSFERS, ISOC_MAX_TRANSFERS);
-	int num_uframes		= MIN(ISOC_NUM_UFRAMES,   ISOC_MAX_UFRAMES);
-	int min_submit_uf	= MAX(ISOC_MIN_UF_SUBMIT, ISOC_MIN_UF_CHUNK);
+	int num_transfers	= min(ISOC_NUM_TRANSFERS, ISOC_MAX_TRANSFERS);
+	int num_uframes		= min(ISOC_NUM_UFRAMES,   ISOC_MAX_UFRAMES);
+	int min_submit_uf	= min(ISOC_MIN_UF_SUBMIT, ISOC_MIN_UF_CHUNK);
 
 	/* OUT */
 	ep = &ci_dev->ep_isoc_out;
@@ -669,13 +669,13 @@ static int ts_write_CAM_prepare(struct ci_device *ci_dev)	/* TS-OUT ringbuffer -
 		return 0;
 
 	if (rb_avail % TS_PACKET_SIZE)
-		pr_warn("%s : TS-packets with %zu trailing bytes\n",
+		pr_warn("%s : TS-packets with %zd trailing bytes\n",
 					__func__, rb_avail % TS_PACKET_SIZE);
 
 	rb_avail -= rb_avail % ep_out->u.isoc.min_chunk_size;
 
 	for (i = 0; i < max_transfers; i++) {
-		size_t left = min(transfer_size, rb_avail);
+		size_t left = min(transfer_size, (int)rb_avail);
 		/*
 		 * write only chunks of full micro-frame size or the
 		 * incoming data is filled up with undefined data
@@ -706,7 +706,7 @@ static int ts_write_CAM_prepare(struct ci_device *ci_dev)	/* TS-OUT ringbuffer -
 			ci_dev->cam_subs++; /* count transmission */
 		}
 #if DEBUG_TS_IO
-		pr_info("%s[%d] : --- %zu x TS, %2d uframes - rb-avail(%zu) CAM(%+d)\n",
+		pr_info("%s[%d] : --- %d x TS, %2d uframes - rb-avail(%zd) CAM(%+d)\n",
 				__func__, i, act_ts, act_uframes,
 				rb_avail / TS_PACKET_SIZE, ci_dev->isoc_TS_CAM);
 #endif
@@ -762,7 +762,7 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 		pr_warn("%s : TS-data with %zu trailing bytes(count %zu)\n",
 				__func__, todo % TS_PACKET_SIZE, count);
 
-	todo = MIN(rb_free, count);
+	todo = min(rb_free, count);
 	todo -= todo % TS_PACKET_SIZE;
 
 	if (todo) {
@@ -794,17 +794,17 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 	struct ep_info *ep		= &ci_dev->ep_isoc_in;
 	struct dvb_ringbuffer *rb	= &ep->erb.buffer;
 
-	size_t read = 0;
-	size_t avail = MIN(dvb_ringbuffer_avail(rb), count);
+	ssize_t read = 0;
+	ssize_t avail = min(dvb_ringbuffer_avail(rb), (ssize_t)count);
 
-	if (avail) {
+	if (avail > 0) {
 		/* copy_to_user */
 		read = dvb_ringbuffer_read_user(rb, buf, avail);
 		if (read != avail)
-			pr_err("%s : *** read(%zu) != avail(%zu)\n",
+			pr_err("%s : *** read(%zd) != avail(%zd)\n",
 						__func__, read, avail);
 #if DEBUG_TS_IO
-		pr_info("%s : *** TS{%02X} (%zu)[%zu]<%zu>\n", __func__,
+		pr_info("%s : *** TS{%02X} (%zu)[%zd]<%zd>\n", __func__,
 				(u8) buf[0], count, read, read/TS_PACKET_SIZE);
 #endif
 	}
