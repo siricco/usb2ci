@@ -749,15 +749,13 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 	size_t todo = 0;
 	size_t written = 0;
 	size_t rb_free = dvb_ringbuffer_free(rb);
+	size_t rb_avail = dvb_ringbuffer_avail(rb);
 
 	ci_dev->isoc_enabled = 1;
 
 	if (rb_free < TS_PACKET_SIZE)
 		pr_err("%s : *** ringbuffer full\n", __func__);
 
-	if (buf[0] != 0x47)
-		pr_warn("%s : TS-Data[0] not SYNC: 0x%02X\n",
-						__func__, buf[0]);
 	if (count % TS_PACKET_SIZE)
 		pr_warn("%s : TS-data with %zu trailing bytes(count %zu)\n",
 				__func__, todo % TS_PACKET_SIZE, count);
@@ -766,18 +764,25 @@ static ssize_t ts_write(struct file *file, const __user char *buf,
 	todo -= todo % TS_PACKET_SIZE;
 
 	if (todo) {
+		 /* read byte from kernel-space ! */
+		u8 sync;
 		/* copy_from_user */
 		written = dvb_ringbuffer_write_user(rb, buf, todo);
 		if (written != todo)
 			pr_err("%s : *** written(%zu) != todo(%zu)\n",
 						__func__, written, todo);
+		sync = DVB_RINGBUFFER_PEEK(rb, rb_avail);
+		if (sync != 0x47)
+			pr_warn("%s : TS-Data[0] not SYNC: 0x%02X\n",
+						__func__, sync);
+		rb_avail += written;
 #if DEBUG_TS_IO
 		pr_info("%s : *** TS{%02X} (%zu)[%zu]<%zu>\n", __func__,
-				(u8) buf[0], count, written, written/TS_PACKET_SIZE);
+				sync, count, written, written/TS_PACKET_SIZE);
 #endif
 	}
 
-	if (dvb_ringbuffer_avail(rb) >= ep->u.isoc.min_submit_size)
+	if (rb_avail >= ep->u.isoc.min_submit_size)
 		ts_CAM_exchange(ci_dev);
 
 	return written;
@@ -798,6 +803,11 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 	ssize_t avail = min(dvb_ringbuffer_avail(rb), (ssize_t)count);
 
 	if (avail > 0) {
+		 /* read byte from kernel-space ! */
+		u8 sync = DVB_RINGBUFFER_PEEK(rb, 0);
+		if (sync != 0x47)
+			pr_warn("%s : TS-Data[0] not SYNC: 0x%02X\n",
+						__func__, sync);
 		/* copy_to_user */
 		read = dvb_ringbuffer_read_user(rb, buf, avail);
 		if (read != avail)
@@ -805,7 +815,7 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 						__func__, read, avail);
 #if DEBUG_TS_IO
 		pr_info("%s : *** TS{%02X} (%zu)[%zd]<%zd>\n", __func__,
-				(u8) buf[0], count, read, read/TS_PACKET_SIZE);
+				sync, count, read, read/TS_PACKET_SIZE);
 #endif
 	}
 	return read;

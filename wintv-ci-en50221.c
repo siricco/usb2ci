@@ -217,7 +217,7 @@ static char * atag2str(u32 atag) {
 
 #define SIZE_INDICATOR 0x80
 
-static int rsn_1_dec(__user char *buf, u16 *size) {
+static int rsn_1_dec(u8 *buf, u16 *size) {
 	u8 size_flag = buf[0];
 
 	if (size_flag < SIZE_INDICATOR) {
