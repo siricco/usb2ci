@@ -75,7 +75,7 @@ static struct usb_id_info usb2_ci_info = {
 
 #define USB_CTL_TIMEOUT 2000
 #define USB_CMD_TIMEOUT 5000 /* 5 seconds */
-#define USB_COR_TIMEOUT 60000 /* 60 seconds */
+#define USB_COR_TIMEOUT 15000 /* 15 seconds (firmware default) */
 
 static int ezusb_ctrl_write(struct wintv_ci_dev *wintvci,
 				unsigned char request,
@@ -696,44 +696,41 @@ static int wintv_usb_ci_apply_patch(struct wintv_ci_dev *wintvci, int addr,
 }
 
 static int wintv_usb_ci_patch_firmware(struct wintv_ci_dev *wintvci,
-					char *fw_name)
+					char *fw_name, int fw_ver)
 {
 	int rc = 0;
-	/* 1. j_CI_70_WRITE_COR - ACL 2.2 */
-	#define ADR_P2030 0x2030
-	char p2030[2][4] = {{ 0x65,0x50,0x70,0x61 }, { 0xE4,0x00,0x00,0x00 }};
-	/* 2. j_CI_70_WRITE_COR - increase timeout (MatrixAir ?) */
-	#define CTMO    (USB_COR_TIMEOUT)
-	#define CTMOH   ((CTMO >> 8) & 0xFF)
-	#define CTMOL   (CTMO & 0xFF)
-	#define ADR_P204A 0x204A
-	char p204A[2][4] = {{ 0x7D,0x98,0x7C,0x3A },{ 0x7D, CTMOL, 0x7C, CTMOH }};
-	/* ignore missing FREE bit */
-	#define ADR_P2064 0x2064
-	char p2064[2][2] = {{ 0x80,0x32 },{ 0x0D, 0x00 }};
+	if (fw_ver == 2) { // applicable for both Wintv and Cinergy firmware
+		/* 1. don't verify COR as the stored value my differ - ACL 2.2 */
+		#define ADR_P2030 0x2030
+		char p2030[2][4] = {{ 0x65,0x50,0x70,0x61 }, { 0xE4,0x00,0x00,0x00 }};
+		/* 2. modify timeout (MatrixAir...) for late response */
+		#define CTMO    (USB_COR_TIMEOUT)
+		#define CTMOH   ((CTMO >> 8) & 0xFF)
+		#define CTMOL   (CTMO & 0xFF)
+		#define ADR_P204A 0x204A
+		char p204A[2][4] = {{ 0x7D,0x98,0x7C,0x3A },{ 0x7D, CTMOL, 0x7C, CTMOH }};
+		/* but ignore missing FREE bit at least */
+		#define ADR_P2064 0x2064
+		char p2064[2][2] = {{ 0x80,0x32 },{ 0x0D, 0x00 }};
 
-	#define FOR_FW "wintvci_r2.fw"
-	if (strcmp(fw_name, FOR_FW))
-		return 0;
-
-	pr_info("*** applying patches to firmware: %s ***\n", fw_name);
-	#define PARAM3(p) p[0], p[1], sizeof(p[1])
-	do {
-		rc = wintv_usb_ci_apply_patch(wintvci, ADR_P2030, PARAM3(p2030));
-		if (rc) break;
-		rc = wintv_usb_ci_apply_patch(wintvci, ADR_P204A, PARAM3(p204A));
-		if (rc) break;
-		rc = wintv_usb_ci_apply_patch(wintvci, ADR_P2064, PARAM3(p2064));
-		if (rc) break;
-	} while (0);
-	if(rc)
-		pr_info("* %s\n", "--- FAILED ---");
-
+		pr_info("*** applying patches to firmware: %s ***\n", fw_name);
+		#define PARAM3(p) p[0], p[1], sizeof(p[1])
+		do {
+			rc = wintv_usb_ci_apply_patch(wintvci, ADR_P2030, PARAM3(p2030));
+			if (rc) break;
+			rc = wintv_usb_ci_apply_patch(wintvci, ADR_P204A, PARAM3(p204A));
+			if (rc) break;
+			rc = wintv_usb_ci_apply_patch(wintvci, ADR_P2064, PARAM3(p2064));
+			if (rc) break;
+		} while (0);
+		if(rc)
+		    pr_info("* %s\n", "--- FAILED ---");
+	}
 	return -rc;
 }
 
 static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
-					char *fw_name )
+					char *fw_name, int fw_ver)
 {
 	const struct firmware *fw = NULL;
 	struct usb_device *udev = wintvci->udev;
@@ -803,7 +800,7 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 		}
 	}
 	/////////////////////////////////////////////
-	wintv_usb_ci_patch_firmware(wintvci, fw_name);
+	wintv_usb_ci_patch_firmware(wintvci, fw_name, fw_ver);
 	/////////////////////////////////////////////
 	EZ_CPU_START(wintvci,wintvci->info->fx);
 
@@ -1086,7 +1083,7 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 		 * First load EZUSB firmware with support of 0xA3 requests
 		 * and show some hardware-info. No automatic USB-renumbering !
 		 */
-		rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name);
+		rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name, 0);
 		if (rc)
 			goto error;
 		wintvci->fw_state = FW_STATE_EZUSB;
@@ -1099,7 +1096,7 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 		snprintf(fw_name, sizeof(fw_name),info->fw_ci_name, fw_ver);
 		pr_info("CI-firmware %s selected\n", fw_name);
 
-		rc = wintv_usb_ci_load_firmware(wintvci, fw_name);
+		rc = wintv_usb_ci_load_firmware(wintvci, fw_name, fw_ver);
 		if (rc)
 			goto error;
 		/* Now the USB-device disconnects and re-appears in warm state */
