@@ -1201,7 +1201,7 @@ MODULE_DEVICE_TABLE (usb, wintv_usb_ci_table);
 
 MODULE_AUTHOR("Helmut Binder");
 MODULE_DESCRIPTION("Hauppauge WinTV-CI USB2 Common Interface driver");
-MODULE_VERSION("0.3.1");
+MODULE_VERSION("0.3.1a");
 MODULE_LICENSE("GPL");
 
 static struct usb_driver wintv_usb_ci_driver = {

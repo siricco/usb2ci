@@ -808,11 +808,6 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 	ssize_t avail = min(dvb_ringbuffer_avail(rb), (ssize_t)count);
 
 	if (avail > 0) {
-		 /* read byte from kernel-space ! */
-		u8 sync = DVB_RINGBUFFER_PEEK(rb, 0);
-		if (sync != 0x47)
-			pr_warn("%s : TS-Data[0] not SYNC: 0x%02X\n",
-						__func__, sync);
 		/* copy_to_user */
 		read = dvb_ringbuffer_read_user(rb, buf, avail);
 		if (read != avail)
