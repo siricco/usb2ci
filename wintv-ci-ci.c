@@ -73,6 +73,11 @@ static int dummy_half_uframes = 1;
 module_param(dummy_half_uframes, int, 0644);
 MODULE_PARM_DESC(dummy_half_uframes, "Quirk to reliable bring the last 2 TS packets of each USB-transfer into the CAM (default:on).");
 
+static int uf_triggers_submission = ISOC_MIN_UF_SUBMIT;
+
+module_param(uf_triggers_submission, int, 0644);
+MODULE_PARM_DESC(uf_triggers_submission, "Set the minimum data in USB microframes which triggera URB submission to the CAM (8..969, default:8).");
+
 /* --- R I N G B U F F E R --- */
 
 static void ts_rb_free(struct ep_info *ep)
@@ -323,13 +328,14 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 
 #define DUMMY_IN_FAST 1
 #define DUMMY_IN_SLOW 0
-static void ci_quirks_set_dummy_IN_num_packets(struct urb *urb, int fast) {
+static void ci_quirks_set_dummy_IN_num_packets(struct urb *urb, int fast, bool quite) {
 #define DUMMY_IN_FAST_UF  1
 #define DUMMY_IN_SLOW_UF  4
 	int uframes = (fast) ? DUMMY_IN_FAST_UF : DUMMY_IN_SLOW_UF;
 	if (urb->number_of_packets != uframes) {
-		pr_info("*** Quirks : set dummy IN packets from %d to %d uframes\n",
-			    urb->number_of_packets, uframes);
+		if (!quite)
+			pr_info("*** Quirks : set dummy IN packets from %d to %d uframes\n",
+				urb->number_of_packets, uframes);
 		urb->number_of_packets = uframes;
 	}
 }
@@ -348,7 +354,7 @@ static void ci_quirks_set_defaults(struct ci_device *ci_dev) {
 		/* IN */
 		isoc = &ci_dev->ep_isoc_in.u.isoc;
 		urb = isoc->transfers[isoc->num_transfers].urb;/* the dummy IN URB */
-		ci_quirks_set_dummy_IN_num_packets(urb, DUMMY_IN_FAST);
+		ci_quirks_set_dummy_IN_num_packets(urb, DUMMY_IN_FAST, true);
 	}
 }
 
@@ -373,7 +379,7 @@ static int ci_isoc_init(struct ci_device *ci_dev)
 
 	int num_transfers	= min(ISOC_NUM_TRANSFERS, ISOC_MAX_TRANSFERS);
 	int num_uframes		= min(ISOC_NUM_UFRAMES,   ISOC_MAX_UFRAMES);
-	int min_submit_uf	= min(ISOC_MIN_UF_SUBMIT, ISOC_MIN_UF_CHUNK);
+	int min_submit_uf	= min(uf_triggers_submission, (num_uframes*num_transfers)-1);
 
 	/* OUT */
 	ep = &ci_dev->ep_isoc_out;
@@ -402,11 +408,10 @@ static int ci_isoc_init(struct ci_device *ci_dev)
 
 void ts_stop_streaming(struct ci_device *ci_dev)
 {
-	pr_info("%s : stop streaming\n", __func__);
-
 	ci_dev->isoc_enabled = 0;
 
 	if (ci_dev->isoc_urbs_running) {
+		pr_info("%s : stop streaming\n", __func__);
 		ci_isoc_kill_urbs(&ci_dev->ep_isoc_out);
 		ci_isoc_kill_urbs(&ci_dev->ep_isoc_in);
 		ci_dev->isoc_urbs_running = 0;
@@ -502,7 +507,7 @@ void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 		if (ci_dev->isoc_urbs_running == 1 && ci_dev->isoc_TS_CAM < 0 &&
 		    dummy_half_uframes && urb->number_of_packets == DUMMY_IN_FAST_UF) { /* more IN then OUT */
 			 /* set for all following submisssions */
-			ci_quirks_set_dummy_IN_num_packets(urb, DUMMY_IN_SLOW);
+			ci_quirks_set_dummy_IN_num_packets(urb, DUMMY_IN_SLOW, false);
 		}
 #if DEBUG_TS_IO
 		pr_info("%s(%d) : --- %d x TS, %2d uframes - rb-avail(%zu) CAM(%+d)\n",
@@ -863,8 +868,7 @@ void ci_reset(struct wintv_ci_dev *wintvci)
 {
 	struct ci_device *ci_dev = &wintvci->ci_dev;
 
-	pr_info("Reset CI Device\n");
-
+	//pr_info("Reset CI Device\n");
 	ts_stop_streaming(ci_dev);
 	ci_quirks_set_defaults(ci_dev);
 

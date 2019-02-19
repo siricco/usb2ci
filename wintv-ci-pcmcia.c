@@ -77,7 +77,7 @@ int parse_cis(unsigned char *cis, int size, struct slot_info *s_info) {
 
 	memset(&c_v1,0,sizeof(c_v1));
 
-//    print_hex_dump(KERN_DEBUG, " CIS : ", DUMP_PREFIX_OFFSET, 16, 1,
+//	print_hex_dump(KERN_DEBUG, " CIS : ", DUMP_PREFIX_OFFSET, 16, 1,
 //			cis, size, 1);
 
 	for (i = 0, i_todo = size; i_todo; i = i_next) {
@@ -116,7 +116,7 @@ int parse_cis(unsigned char *cis, int size, struct slot_info *s_info) {
 
 			u8 cc_rasz = cis[i] & 0x3;
 			u8 cc_rmsz = (cis[i] >> 2) & 0xF; /* up to 16 bytes (128 bits) for Cfg-Reg-Present */
-
+			u8 cc_rfsz = (cis[i] >> 6) & 0x3; /* reserved size 0..3 bytes */
 			i += 2;
 
 			/* [4] RADR */
@@ -125,21 +125,15 @@ int parse_cis(unsigned char *cis, int size, struct slot_info *s_info) {
 			}
 			pr_info("%s : CFG_BASE: 0x%X (Cfg.Reg[0] in Attrib.Memory)\n",
 					__func__, cfg_base);
-
 			s_info->config_base = cfg_base;
 
 			for (n = 0; n <= cc_rmsz; n++, i++) {
 			    pr_info("%s : CFG_REGS present [%d-%d] = 0x%02X\n",
 					__func__, n<<3, ((n+1)<<3)-1, cis[i]);
 			}
-			/* skip up to 3 zeros */
-			for (n = 0; n < 3; n++, i++)
-				if (cis[i])
-					break; /* none-zero */
-#if CIS_DEBUG
-			if (n)
-				pr_info("%s : skipped %d zero-bytes\n",__func__, n);
-#endif
+
+			i += cc_rfsz;/* skip up to 3 reserved bytes */
+
 			/* check sub-tuples for valid custom-interface with if-code 0x241 (DVB CI) */
 			cc_index = 0;
 			for (j = i, j_todo = i_next - i; j_todo; j = j_next, cc_index++) {
@@ -188,18 +182,19 @@ int parse_cis(unsigned char *cis, int size, struct slot_info *s_info) {
 
 			if (!s_info->cis_valid)
 				break; /* no vaild CI-card interface found  (or 0x1A not parsed) */
-
 			if ((tpce_idx & 0x80) == 0)
 				continue; /* no cfg-byte */
 
 			if_type = cis[i+1] & 0xF;
-			if (if_type != (cc_index+4)) { /* custom interfaces start at 4 */
+			cfg_option = tpce_idx & 0x3F;
+
+			if (if_type != (cc_index+4) || 		/* custom interfaces start at 4 */
+			   (cfg_option & 0x5) != 0x5) {		/* only if enabled and use IRGs */
 				pr_info("%s : skip Interface description for IF-index %d, cfg-options 0x%X\n",
-							__func__, if_type, tpce_idx & 0x3F);
+							__func__, if_type, cfg_option);
 				continue;
 			}
 
-			cfg_option = tpce_idx & 0x3F;
 			if (!s_info->config_option || (tpce_idx & 0x40)) { /* store new or last default */
 				pr_info("%s : CFG-OPTIONS: 0x%X\n",
 							__func__, cfg_option);
