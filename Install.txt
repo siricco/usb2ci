@@ -25,3 +25,25 @@ Installation of the USB-Common Interface from Hauppauge or Terratec for the usag
 5) Insert CAM and smartcard and plug in the USB-CI-Adapter
 
 6) run VDR and switch to a scrambled channel
+
+
+--- CONFIGURATION ---
+
+In version 0.3.3 following module parameters are available:
+
+- fx2_movx_stretch:       "Number of additional 'stretch memory cycles' for the FX2 MOVX instruction (range 0..7, default:3)."
+                          *** Important! *** a good value for most CAMs is "6"
+
+- dummy_half_uframes:     "Quirk to reliable bring the last 2 TS packets of each USB-transfer into the CAM (0..4, default:2)."
+                          *** Important! *** good values are "2" and "1" or "3"
+
+- use_dma_coherent:       "Use usb_alloc_coherent() for isoc-urbs - not recommended for most non-x86 hardware (default:off)."
+
+- uf_triggers_submission: "Set the minimum data in USB microframes which triggera URB submission to the CAM (8..969, default:8)."
+                          *** Hint *** with minisatip use uf_triggers_submission=96 to transmit around 15 URBs/s for each 10Mbit/s of TS-Data
+
+- show_ts_bitrate:        "Report the current TS datarate (every 10 secs) (default:off)."
+
+- show_tpdu_info:         "Show/Dump TPDU messages (default:off)."
+
+See also "modprobe.d.wintvci.conf.example"
