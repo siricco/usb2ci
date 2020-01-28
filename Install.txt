@@ -20,7 +20,8 @@ Installation of the USB-Common Interface from Hauppauge or Terratec for the usag
 
 3) Make sure to have the vdr-plugin ddci2 installed and activated
 
-4) Insert CAM and smartcard and plug in the USB-CI-Adapter
+4) Adjust the module options e.g. create a wintvci.conf file in /etc/modules.d directory
 
-4) run VDR and switch to a scrambled channel
+5) Insert CAM and smartcard and plug in the USB-CI-Adapter
 
+6) run VDR and switch to a scrambled channel

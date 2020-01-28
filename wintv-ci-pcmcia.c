@@ -3,7 +3,8 @@
  *
  * Copyright (C) 2017 Helmut Binder (cco@aon.at)
  #
- * (+HB+) 2017-08-13 
+ * (+HB+) 2017-08-13
+ * (+HB+) 2019-02-19
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License

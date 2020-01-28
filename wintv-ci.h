@@ -4,6 +4,7 @@
  * Copyright (C) 2017 Helmut Binder (cco@aon.at)
  #
  * (+HB+) 2017-08-13
+ * (+HB+) 2019-11-11
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -51,6 +52,7 @@ struct ezusb_fx_type {
 };
 
 struct usb_id_info {
+	bool is_wintvci;
 	const char *fw_ci_name;
 	const char *fw_cb_name;
 	int max_ver_hw;
@@ -67,7 +69,7 @@ struct usb_id_info {
 #define CA_CTRL_MAXPKT		0x40
 #define CA_CTRL_MAXPKT_DATA	(CA_CTRL_MAXPKT - 4) /* -4 byte cmd-header */
 /* Control interface max. message-size */
-#define CA_CTRL_MAXMSG		0xFF
+#define CA_CTRL_MAXMSG		0x100
 /* Control interface max. TPDU-size */
 #define CA_CTRL_MAXTPDU		4096
 
@@ -100,7 +102,7 @@ struct urb_transfer {
 
 struct isoc_info {
 	int			uframe_size;	/* maxp */
-	int 			num_uframes;	/* 1..255 */
+	int			num_uframes;	/* 1..255 */
 	int			transfer_size;
 	int			min_chunk_size;
 	int			min_submit_size;
@@ -109,7 +111,10 @@ struct isoc_info {
 	struct urb_transfer	*urbs;
 
 	int			num_transfers;	/* 1.. */
-	struct urb_transfer	*transfers;	/* TS transfers */
+	struct urb_transfer	*transfers;	/* regular TS transfers */
+
+	int			num_spares;	/* 1.. */
+	struct urb_transfer	*spares;	/* spare transfers */
 };
 
 struct ca_cmd_sndhd {
@@ -203,19 +208,22 @@ struct ci_device {
 
 	struct dvb_device	*regdev_ci;
 	struct mutex		ci_mutex;
-	spinlock_t 		ci_lock;
+	spinlock_t		ci_lock;
 	unsigned long		ci_lock_flags;
 
 	struct ep_info		ep_isoc_in;	/* isochronous */
 	struct ep_info		ep_isoc_out;	/* isochronous */
 
 	int			isoc_enabled;		/* streaming 0/1 */
+	int			isoc_tsnull_pending;	/* #of unread ts-null uframes */
+	int			isoc_is_sync;
 	int			isoc_urbs_running;	/* #of urbs running */
 	wait_queue_head_t	isoc_urbs_wq;		/* urb wait-queue */
 
 	/* packets write/read observing */
 	int		cam_subs;
 	int		cam_uframes;
+	int		cam_syncs;
 	int		ts_count;
 	unsigned long	ts_count_timeout;
 	int		isoc_TS_CAM;
@@ -244,6 +252,7 @@ struct wintv_ci_dev {
 	/* logs */
 	u8			last_status;
 	int			last_status_cnt;
+	unsigned long		last_exchange;
 
 	/* DVB */
 	struct dvb_adapter	adapter;
@@ -295,10 +304,9 @@ void ca_detach(struct wintv_ci_dev *wintvci);
  * --- C I / S E C - D E V I C E ---
  */
 
-void ts_urb_complete(struct urb *urb);
-
 void ci_reset(struct wintv_ci_dev *wintvci);
 int  ci_attach(struct wintv_ci_dev *wintvci);
 void ci_detach(struct wintv_ci_dev *wintvci);
 
+int ci_CAM_sync(struct ci_device *ci_dev, bool wait_sync_done);
 /***/

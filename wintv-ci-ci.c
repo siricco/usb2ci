@@ -8,6 +8,7 @@
  * (+HB+) 2017-10-21 partialy solved usb-lock with ts-streaming
  * (+HB+) 2018-03-04 Version 0.2
  * (+HB+) 2018-10-13 Version 0.3
+ * (+HB+) 2020-01-28 Version 0.3.3
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -41,16 +42,19 @@
 #define ISOC_NUM_TRANSFERS	8
 #define ISOC_NUM_UFRAMES	120 /* 15 ms | frames */
 
+#define SPARE_NULL		0
+#define SPARE_SYNC		1
+
+#define ISOC_NUM_SPARES		2
+#define ISOC_MAX_UF_SPARES	32
+
 #define ISOC_MIN_UF_CHUNK	8 /* transmit only in chunks of 8 micro-frames (1 full frame) */
 #define ISOC_MIN_UF_SUBMIT	ISOC_MIN_UF_CHUNK /* the minimum of data to start a URB submission to the CAM */
 
 /* a lot of TS in/out massages */
 #define DEBUG_TS_IO 0
 #define DEBUG_TS_IN 0
-
-/* --- C I / C A M   Q U I R K S --- */
-unsigned int dummy_ts_marker		= 0;
-unsigned int dummy_ts_echo_marker	= 0;
+#define DEBUG_TS_SYN 1
 
 /* --- P A R A M E T E R S --- */
 static int use_dma_coherent = 0;
@@ -71,12 +75,13 @@ MODULE_PARM_DESC(show_ts_bitrate, " Report the current TS datarate (every 10 sec
 static int dummy_half_uframes = 1;
 
 module_param(dummy_half_uframes, int, 0644);
-MODULE_PARM_DESC(dummy_half_uframes, "Quirk to reliable bring the last 2 TS packets of each USB-transfer into the CAM (default:on).");
+MODULE_PARM_DESC(dummy_half_uframes, " Quirk to reliable bring the last 2 TS packets of each USB-transfer into the CAM (0..4, default:2).");
 
 static int uf_triggers_submission = ISOC_MIN_UF_SUBMIT;
 
 module_param(uf_triggers_submission, int, 0644);
-MODULE_PARM_DESC(uf_triggers_submission, "Set the minimum data in USB microframes which triggera URB submission to the CAM (8..969, default:8).");
+MODULE_PARM_DESC(uf_triggers_submission, " Set the minimum data in USB microframes which triggera URB submission to the CAM (8..969, default:8).");
+					// Hint: with minisatip use uf_triggers_submission=96 to transmit around 15 URBs/s for each 10Mbit/s of TS-Data
 
 /* --- R I N G B U F F E R --- */
 
@@ -95,8 +100,11 @@ static int ts_rb_alloc(struct ep_info *ep,
 				int num_uframes)
 {
 	/*  dvb_ringbuffer_free returns the buffer-size - 1 byte */
-	int size = ep->maxp * num_uframes * num_transfers + ep->maxp;
-	int ts = size / TS_PACKET_SIZE;
+	int trans = ep->maxp * (num_uframes * num_transfers);
+	int spare = ep->maxp * (ISOC_MAX_UF_SPARES * ISOC_NUM_SPARES * 2); /* 32 -> 2 NULL + 30 syncs */
+	int size = 2*trans + spare;/* double buffer for delay with syncy */
+	int tst = trans / TS_PACKET_SIZE;
+	int tss = spare / TS_PACKET_SIZE;
 	void *buf = ci_kmalloc(size, 0, (char *)__func__);
 
 	if (!buf)
@@ -105,49 +113,62 @@ static int ts_rb_alloc(struct ep_info *ep,
 	dvb_ringbuffer_init(&ep->erb.buffer, buf, size);
 	ep->erb.num_items = 0;
 
-	pr_info("%s : EP(%02X) ringbuffer size %d bytes (%d x %d | %d TS-packets)\n",
+	pr_info("%s : EP(%02X) ringbuffer size %d bytes (%d x %d + %d | %d TS-packets)\n",
 				__func__, ep->addr, size,
-				num_transfers, ts/num_transfers, ts);
+				num_transfers, tst/num_transfers, tss, tst + tss);
 	return 0;
 }
 
-/*
- *  Q U I R K   H A L F   U F R A M E S
- */
+/* --- T S - N U L L  B U F F E R --- */
 
-static int dummy_ts_fill_uframes(unsigned char *buf, int ts_num)
+#define TS_NULL_MARKER 0xC4
+#define TS_NULL_MARK1 0x1FFF10
+#define TS_NULL_MARK32 (TS_NULL_MARKER << 24 | TS_NULL_MARKER << 16 | TS_NULL_MARKER << 8 | TS_NULL_MARKER)
+#define TS_NULL_MARK24 (TS_NULL_MARKER << 16 | TS_NULL_MARKER << 8 | TS_NULL_MARKER)
+
+static int isoc_tsnull_setup(unsigned char *buf, int ts_num)
 {
-	unsigned char load[TS_PACKET_SIZE];
 	unsigned char *b = buf;
 	int i;
-	/* initialize the dummy-TS - any values are possible, we enumerate */
-	for (i = 0; i < sizeof(load); i++) {
-		load[i] = i;
-	}
-	/*
-	 * As we send onyl a half filled uframes, we receive 2 additional "echo"-TS packets.
-	 * The data of this echo-TS is the repetiition of the last 2 bytes of the dummy-TS.
-	 * insert this pattern as marker in the dummy-TS too (at offset 4)
-	 */
-	dummy_ts_marker = *(u16*)(load+TS_PACKET_SIZE-2);
-	dummy_ts_marker |= dummy_ts_marker << 16; /* the data of echo-TS */
-	dummy_ts_echo_marker = cpu_to_be32(dummy_ts_marker) & 0x00FFFFFF; /* ignore 1 byte of echo-TS */
 
 	for (i = 0; i < ts_num; i++, b += TS_PACKET_SIZE) {
-		memcpy(b, load, sizeof(load));
+		memset(b, TS_NULL_MARKER, TS_PACKET_SIZE);
 		b[0] = 0x47;
 		b[1] = 0x1F;
 		b[2] = 0xFF;
 		b[3] = 0x10 | (i & 0xF);
-		*(u32*)(b+4) = dummy_ts_marker;
 	}
 #if 0
-	pr_info("%s : m1:%08X m2:%08X\n",
-				__func__, dummy_ts_marker, dummy_ts_echo_marker);
-	print_hex_dump(KERN_DEBUG, " Dummy-TS : ",
+	pr_info("%s : m1:%08X m2:%08X m3:%08X\n",
+				__func__, TS_NULL_MARK1, TS_NULL_MARK32, TS_NULL_MARK24);
+	print_hex_dump(KERN_DEBUG, " TS-NULL : ",
 					DUMP_PREFIX_OFFSET, 16, 1,
 					buf, TS_PACKET_SIZE*2, 1);
 #endif
+	return 0;
+}
+
+static void isoc_tsnull_free(struct ci_device *ci_dev)
+{
+	;
+}
+
+static int isoc_tsnull_alloc(struct ci_device *ci_dev)
+{
+	struct ep_info *ep_out = &ci_dev->ep_isoc_out;/* spare URB */
+	struct isoc_info *isoc = &ep_out->u.isoc;
+
+	int size   = isoc->uframe_size * ISOC_MAX_UF_SPARES;
+	int ts_num = size / TS_PACKET_SIZE;
+	int i;
+
+	pr_info("%s : Init %d spare out-URBs with %d TS-NULL packets (%d uframes)\n", __func__, isoc->num_spares, ts_num, ISOC_MAX_UF_SPARES);
+
+	for (i = 0; i < isoc->num_spares; i++) {
+		struct urb *urb_out = isoc->spares[i].urb;
+		isoc_tsnull_setup(urb_out->transfer_buffer, ts_num);
+	}
+
 	return 0;
 }
 
@@ -204,7 +225,7 @@ static int ci_isoc_allocate(struct ep_info *ep,
 {
 	struct isoc_info *isoc	= &ep->u.isoc;
 	int uframe_size		= ep->maxp;
-	int num_urbs		= num_transfers + 1; /* add 1 special transfer */
+	int num_urbs		= num_transfers + ISOC_NUM_SPARES;
 	int i;
 
 	isoc->uframe_size	= uframe_size;
@@ -215,6 +236,7 @@ static int ci_isoc_allocate(struct ep_info *ep,
 
 	isoc->num_urbs		= 0;
 	isoc->num_transfers	= 0;
+	isoc->num_spares	= 0;
 
 	isoc->urbs		= ci_kmalloc(num_urbs * sizeof(*isoc->urbs),
 						1, (char *)__func__);
@@ -264,9 +286,13 @@ static int ci_isoc_allocate(struct ep_info *ep,
 
 	isoc->num_transfers	= num_transfers;
 	isoc->transfers		= &isoc->urbs[0];
+	isoc->num_spares	= num_urbs - num_transfers;
+	isoc->spares		= &isoc->urbs[num_transfers];
 
 	return 0;
 }
+
+static void ts_urb_complete(struct urb *urb);
 
 static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 {
@@ -297,8 +323,8 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 		urb->interval			= 1 << (ep->binterval - 1); /* 1 << (1 - 1) = 1 */
 
 		urb->complete			= ts_urb_complete;
-
 		urb->transfer_flags		= URB_ISO_ASAP;
+		//urb->transfer_flags		= 0;
 
 		if (use_dma_coherent) {
 			urb->transfer_flags	|= URB_NO_TRANSFER_DMA_MAP;
@@ -306,61 +332,22 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 		}
 		urb->transfer_buffer		= xfer->xfer_buffer;
 		urb->number_of_packets		= isoc->num_uframes;
-		urb->transfer_buffer_length 	= isoc->transfer_size;
+		urb->transfer_buffer_length	= isoc->transfer_size;
 
 		for (j = 0; j < isoc->num_uframes; j++) {
 			urb->iso_frame_desc[j].offset = uframe_ofs;
 			urb->iso_frame_desc[j].length = uframe_len;
 			uframe_ofs += uframe_len;
 		}
-		if (i == isoc->num_transfers && dummy_half_uframes) {
-			if (ep->dir == USB_DIR_OUT) {
-				dummy_ts_fill_uframes(urb->transfer_buffer,
-							isoc->uframe_size / TS_PACKET_SIZE); /* only 1 uframe */
-				for (j = 0; j < isoc->num_uframes; j++) {
-					urb->iso_frame_desc[j].length = 0; /*no data to send */
-				}
-			}
-		}
 	}
 	return 0;
-}
-
-#define DUMMY_IN_FAST 1
-#define DUMMY_IN_SLOW 0
-static void ci_quirks_set_dummy_IN_num_packets(struct urb *urb, int fast, bool quite) {
-#define DUMMY_IN_FAST_UF  1
-#define DUMMY_IN_SLOW_UF  4
-	int uframes = (fast) ? DUMMY_IN_FAST_UF : DUMMY_IN_SLOW_UF;
-	if (urb->number_of_packets != uframes) {
-		if (!quite)
-			pr_info("*** Quirks : set dummy IN packets from %d to %d uframes\n",
-				urb->number_of_packets, uframes);
-		urb->number_of_packets = uframes;
-	}
-}
-
-static void ci_quirks_set_defaults(struct ci_device *ci_dev) {
-	if (dummy_half_uframes) {
-#define DUMMY_OUT_TS      2 /* only 2 TS-packets are required for slower CAMs! */
-#define DUMMY_OUT_UF      1
-		struct isoc_info *isoc;//	= &ep->u.isoc;
-		struct urb *urb;
-		/* OUT */
-		isoc = &ci_dev->ep_isoc_out.u.isoc;
-		urb = isoc->transfers[isoc->num_transfers].urb;/* the dummy OUT URB */
-		urb->number_of_packets = DUMMY_OUT_UF;
-		urb->iso_frame_desc[0].length = TS_PACKET_SIZE * DUMMY_OUT_TS;
-		/* IN */
-		isoc = &ci_dev->ep_isoc_in.u.isoc;
-		urb = isoc->transfers[isoc->num_transfers].urb;/* the dummy IN URB */
-		ci_quirks_set_dummy_IN_num_packets(urb, DUMMY_IN_FAST, true);
-	}
 }
 
 static void ci_isoc_exit(struct ci_device *ci_dev)
 {
 	struct ep_info *ep;
+
+	isoc_tsnull_free(ci_dev);
 
 	ep = &ci_dev->ep_isoc_in;
 	ci_isoc_free(ep);
@@ -401,12 +388,15 @@ static int ci_isoc_init(struct ci_device *ci_dev)
 		return rc;
 	ci_isoc_setup(ep, udev);
 
-	return 0;
+	/* TS-NULL OUT */
+	rc = isoc_tsnull_alloc(ci_dev);
+
+	return rc;
 }
 
 /* --- U R B - C O M P L E T E --- */
 
-void ts_stop_streaming(struct ci_device *ci_dev)
+static void ts_stop_streaming(struct ci_device *ci_dev)
 {
 	ci_dev->isoc_enabled = 0;
 
@@ -420,32 +410,35 @@ void ts_stop_streaming(struct ci_device *ci_dev)
 	dvb_ringbuffer_flush_spinlock_wakeup(&ci_dev->ep_isoc_in.erb.buffer);
 }
 
-void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
+static int ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 {
-	struct ep_info *ep_in		= urb->context;
-	struct ci_device *ci_dev	= &ep_in->wintvci->ci_dev;
+	struct ep_info *ep		= urb->context;
+	struct ci_device *ci_dev	= &ep->wintvci->ci_dev;
 
-	struct dvb_ringbuffer *rb	= &ep_in->erb.buffer;
-	struct isoc_info *isoc		= &ep_in->u.isoc;
+	struct dvb_ringbuffer *rb	= &ep->erb.buffer;
+	struct isoc_info *isoc		= &ep->u.isoc;
 	int rb_free			= dvb_ringbuffer_free(rb);
 	u8 *b				= (u8 *)urb->transfer_buffer;
 
 	int act_size = 0;
 	int num_uframes = 0;
 	int i;
-	int nts = 0;
+	int nts = 0, ets = 0, lost = 0,zero = 0;
 
 	for (i = 0; i < urb->number_of_packets; i++) {
 		int uf_ofs		= urb->iso_frame_desc[i].offset;
 		int uf_size		= urb->iso_frame_desc[i].actual_length;
+		unsigned char *uf	= b + uf_ofs;
 
 		if (urb->iso_frame_desc[i].status != 0) {
 			pr_err("%s : uframe #%d: error with status(%d)\n",
 				__func__, i, urb->iso_frame_desc[i].status);
 			continue;
 		}
-		else if (!uf_size)
+		else if (!uf_size) {
+			zero++;
 			continue;
+		}
 		else if (uf_size != isoc->uframe_size) {
 			pr_err("%s : uframe #%d: bad size %d\n",
 						__func__, i , uf_size);
@@ -453,33 +446,47 @@ void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 		}
 
 		if (rb_free < uf_size) {
-			pr_warn("%s : uframe #%d RB full - lost %d old TS\n",
-					__func__, i, uf_size/TS_PACKET_SIZE);
+			//pr_warn("%s : uframe #%d RB full - lost %d old TS\n",
+			//		__func__, i, uf_size/TS_PACKET_SIZE);
 			DVB_RINGBUFFER_SKIP(rb, uf_size);
 			rb_free += uf_size;
+			lost++;
 		}
 
-		if (dummy_half_uframes) { /* filter out the special half-uframes TS */
-			unsigned char *ts	= b + uf_ofs;
-			int ts_num		= isoc->uframe_size / TS_PACKET_SIZE;
+		if (ci_dev->isoc_tsnull_pending) { /* filter out the TS-null packets */
+			unsigned char *ts = uf;
+			int ts_num = isoc->uframe_size / TS_PACKET_SIZE;
 			int j;
-
 			for (j = 0; j < ts_num; j++, ts += TS_PACKET_SIZE) {
 				u32 mark = *(u32 *)(ts + 4);
 #if DEBUG_TS_IN
 				pr_info(" * TS[%d/%d] %*ph\n", i, j, 8, ts);
 #endif
-				if (mark == dummy_ts_marker) { /* found the marker at offset 4 */
+				if (mark == TS_NULL_MARK32) { /* found the marker at offset 4 */
 					mark = cpu_to_be32(*(u32 *)ts);
-					if ( ((mark & 0x00FFFFF0) == 0x1FFF10) ||		/* our special dummy-TS */
-					     ((mark & 0x00FFFFFF) == dummy_ts_echo_marker)) {	/* additional "echo"-TS from obove */
+					if ( ((mark & 0x00FFFFF0) == TS_NULL_MARK1) ||	/* our special dummy-TS */
+					     ((mark & 0x00FFFFFF) == TS_NULL_MARK24)) {	/* additional "echo"-TS from obove */
 #if DEBUG_TS_IN
 						pr_info("%s(%d) : skip Dummy-TS [%d/%d]\n",
 								__func__, ci_dev->isoc_urbs_running, i, j);
 #endif
 						nts++;
+						if ((mark & 0x00FFFFFF) == TS_NULL_MARK24)
+							ets++;
 						continue;
 					}
+				}
+				if (*ts != 0x47) {
+					int s;
+					if (*(u32 *)ts == *(u32 *)(ts + 4)) 
+						continue; // mixed-up memory "echo" packet - no error !
+					for (s = 0; s < TS_PACKET_SIZE; s++) {
+						if (ts[s] == 0x47)
+							break;
+					}
+					pr_err(" * TS[%d,%d#%d/%d] not SYNC[%d]: [%*ph ...]\n", zero, urb->number_of_packets-1, i, j, s, 8, ts);
+					//pr_err(" * TS[%d,%d#%d/%d] not SYNC: [%*ph ...]\n", zero, urb->number_of_packets-1, i, j, 8, ts);
+					continue;
 				}
 				dvb_ringbuffer_write(rb, ts, TS_PACKET_SIZE);
 				rb_free -= TS_PACKET_SIZE;
@@ -487,49 +494,47 @@ void ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 			}
 		}
 		else {
-			if (b[uf_ofs] != 0x47)
+			if (*uf != 0x47)
 				pr_warn("%s : uframe #%d not SYNC: 0x%02X\n",
-							__func__, i, b[uf_ofs]);
-			dvb_ringbuffer_write(rb, b + uf_ofs, uf_size);
+						__func__, i, *uf);
+			dvb_ringbuffer_write(rb, uf, uf_size);
 			rb_free -= uf_size;
 			act_size += uf_size;
 		}
 		num_uframes++;
 	}
-#if DEBUG_TS_IN
-	if (nts)
-		pr_info("%s(%d) : skipped %d dummy-TS\n", __func__, ci_dev->isoc_urbs_running, nts);
+
+	if (lost)
+		pr_warn("%s(%d) : lost %d uframes\n", __func__, ci_dev->isoc_urbs_running, lost);
+//#if DEBUG_TS_SYN
+#if 0
+	if (ets & 0x1)
+		pr_info("%s(%d) : skipped %d/%d TS-NULL packets\n", __func__, ci_dev->isoc_urbs_running, nts, ets);
 #endif
 	if (act_size) {
 		ci_dev->isoc_TS_CAM -= act_size / TS_PACKET_SIZE;
-
-		/* adjust dummy reader for slow respronsing CAMs */
-		if (ci_dev->isoc_urbs_running == 1 && ci_dev->isoc_TS_CAM < 0 &&
-		    dummy_half_uframes && urb->number_of_packets == DUMMY_IN_FAST_UF) { /* more IN then OUT */
-			 /* set for all following submisssions */
-			ci_quirks_set_dummy_IN_num_packets(urb, DUMMY_IN_SLOW, false);
-		}
 #if DEBUG_TS_IO
 		pr_info("%s(%d) : --- %d x TS, %2d uframes - rb-avail(%zu) CAM(%+d)\n",
 				__func__, ci_dev->isoc_urbs_running, act_size / TS_PACKET_SIZE, num_uframes,
 				dvb_ringbuffer_avail(rb)/TS_PACKET_SIZE, ci_dev->isoc_TS_CAM);
 #endif
-		wake_up_interruptible(&ep_in->erb.wq); /* ep-in waitqueue RB --> HOST*/
+		//wake_up_interruptible(&ep_in->erb.wq); /* ep-in waitqueue RB --> HOST*/
 	}
-	return;
+	return act_size;
 }
 
-void ts_write_CAM_complete(struct urb *urb)
+static void ts_write_CAM_complete(struct urb *urb)
 {
 	return;
 }
 
-void ts_urb_complete(struct urb *urb)
+static void ts_urb_complete(struct urb *urb)
 {
 	struct ep_info *ep		= urb->context;
 	struct ci_device *ci_dev	= &ep->wintvci->ci_dev;
 
 	unsigned int dir = (ep->addr & USB_ENDPOINT_DIR_MASK);
+	int rd_size = 0;
 
 	if (urb->status) { /* no success */
 		switch (urb->status) {
@@ -548,16 +553,20 @@ void ts_urb_complete(struct urb *urb)
 		}
 	}
 	if (dir == USB_DIR_IN)
-		ts_read_CAM_complete(urb); /* CAM --> TS-IN ringbuffer */
+		rd_size = ts_read_CAM_complete(urb); /* CAM --> TS-IN ringbuffer */
 	else
 		ts_write_CAM_complete(urb); /* TS-OUT ringbuffer --> CAM */
 
 	ci_dev->isoc_urbs_running--;
 
-	if (!ci_dev->isoc_urbs_running && ci_dev->isoc_TS_CAM) { // not all packets have been sent to CAM
-		pr_warn("%s : TS CAM-IO: %+d", __func__, ci_dev->isoc_TS_CAM);
-		ci_dev->isoc_TS_CAM_total += ci_dev->isoc_TS_CAM;
-		ci_dev->isoc_TS_CAM = 0;
+	if (!ci_dev->isoc_urbs_running) {
+		if (ci_dev->isoc_TS_CAM && (abs(ci_dev->isoc_TS_CAM) != 2)) { // not all packets have been sent to CAM
+			pr_warn("%s : TS CAM-IO: %+d", __func__, ci_dev->isoc_TS_CAM);
+			ci_dev->isoc_TS_CAM_total += ci_dev->isoc_TS_CAM;
+			ci_dev->isoc_TS_CAM = 0;
+		}
+		if (dir == USB_DIR_IN && rd_size)
+			wake_up_interruptible(&ep->erb.wq); /* ep-in waitqueue RB --> HOST*/
 	}
 
 	wake_up_interruptible(&ci_dev->isoc_urbs_wq); /* urb waitqueue */
@@ -575,9 +584,13 @@ static int ts_write_CAM_submit(struct ci_device *ci_dev, int transfers) /* URBs 
 	struct urb *urb_out, *urb_in;
 	int i, rc = 0;
 
+	ci_dev->isoc_is_sync = 1;
+
 	for (i = 0; i < transfers; i++) {
 		urb_out	= ep_out->u.isoc.transfers[i].urb;
 		urb_in	= ep_in->u.isoc.transfers[i].urb;
+#define SPINLOCK 1
+#if SPINLOCK
 		/* start the first urb transfers at the very beginning of a new uframe! */
 		if (i == 0) {
 			int cf = usb_get_current_frame_number(ci_dev->wintvci->udev);
@@ -594,7 +607,7 @@ static int ts_write_CAM_submit(struct ci_device *ci_dev, int transfers) /* URBs 
 			} while (nf == cf); // loops up to 1ms
 			//if (cnt > 200) pr_info("%s : frame-number:%d, %d\n", __func__, nf << 3, cnt);
 		}
-
+#endif
 		/* submit out-urb - at first */
 		rc = usb_submit_urb(urb_out, GFP_ATOMIC);
 		if (rc < 0)
@@ -608,31 +621,45 @@ static int ts_write_CAM_submit(struct ci_device *ci_dev, int transfers) /* URBs 
 			pr_warn("%s : Could not submit TS-IN URB[%d/%d]: (%d)\n",
 						__func__, i, transfers, rc);
 		ci_dev->isoc_urbs_running++;
-
+#if SPINLOCK
 		if (i == 0)
 			spin_unlock_irqrestore(&ci_dev->ci_lock, ci_dev->ci_lock_flags);
-
-		if (urb_out->start_frame != urb_in->start_frame)
-			pr_err("%s[%d] : diff. start_frames: out/in: %d/%d\n",
-				__func__, i, urb_out->start_frame, urb_in->start_frame);
+#endif
 	}
-	if (i && dummy_half_uframes) {
-		/* submit special URBs */
-		int j = ep_out->u.isoc.num_transfers;
+	if (i) {
+		int sfd = urb_out->start_frame - urb_in->start_frame;
+		ci_dev->isoc_is_sync = (sfd & 0x7) == 0;
+		if (!ci_dev->isoc_is_sync) {
+#if DEBUG_TS_SYN
+			pr_warn("%s[%d] : async. start_frames: out/in: %d/%d\n",
+				__func__, i, urb_out->start_frame, urb_in->start_frame);
+#endif
+			;
+		}
+		if (dummy_half_uframes) {
+			ci_dev->isoc_tsnull_pending = 1;
+			urb_out = ep_out->u.isoc.spares[SPARE_NULL].urb;/* spare URB */
+			urb_in  = ep_in->u.isoc.spares[SPARE_NULL].urb;/* spare URB */
 
-		urb_out = ep_out->u.isoc.transfers[j].urb;
-		urb_in  = ep_in->u.isoc.transfers[j].urb;
+			urb_out->iso_frame_desc[0].length = dummy_half_uframes * TS_PACKET_SIZE; /* n TS */
+			#define NULL_UF 1
+			urb_out->number_of_packets = NULL_UF;
+			urb_in->number_of_packets = NULL_UF;
 
-		rc = usb_submit_urb(urb_out, GFP_ATOMIC);
-		ci_dev->isoc_urbs_running++;
+			urb_out->transfer_buffer_length = NULL_UF * ep_out->u.isoc.uframe_size;
+			urb_in->transfer_buffer_length = NULL_UF * ep_in->u.isoc.uframe_size;
 
-		rc = usb_submit_urb(urb_in, GFP_ATOMIC);
-		ci_dev->isoc_urbs_running++;
+			rc = usb_submit_urb(urb_out, GFP_ATOMIC);
+			ci_dev->isoc_urbs_running++;
+
+			rc = usb_submit_urb(urb_in, GFP_ATOMIC);
+			ci_dev->isoc_urbs_running++;
+		}
 	}
 	return rc;
 }
 
-void report_ts_bitrate(struct ci_device *ci_dev)
+static void report_ts_bitrate(struct ci_device *ci_dev)
 {
 #define TS_COUNT_TIME    10 /* secs */
 #define TS_COUNT_TIMEOUT (HZ * TS_COUNT_TIME)
@@ -646,11 +673,12 @@ void report_ts_bitrate(struct ci_device *ci_dev)
 		int mbitx100 = ci_dev->ts_count / time * HZ * 8; /* bits/second */
 			mbitx100 /= (1000 * 1000 / 100);
 
-		pr_info(" +++ TS-BITRATE : %2d.%02d Mbit/s, %2d.%02d CAM-subs/s, URB-load: %2d.%02d%%, TS-miss: %d\n",
-			mbitx100 / 100,mbitx100 % 100, scam100 / 100, scam100 % 100, uf100/100, uf100 % 100, ci_dev->isoc_TS_CAM_total);
+		pr_info(" +++ TS-BITRATE : %2d.%02d Mbit/s, %2d.%02d CAM-subs/s, URB-load: %2d.%02d%%, TS-miss: %d TS-sync: %d\n",
+			mbitx100 / 100,mbitx100 % 100, scam100 / 100, scam100 % 100, uf100/100, uf100 % 100, ci_dev->isoc_TS_CAM_total, ci_dev->cam_syncs);
 
 		ci_dev->cam_subs = 0;
 		ci_dev->cam_uframes = 0;
+		ci_dev->cam_syncs = 0;
 		ci_dev->ts_count = 0;
 		ci_dev->ts_count_timeout = timer_now + TS_COUNT_TIMEOUT;
 	}
@@ -661,10 +689,10 @@ static int ts_write_CAM_prepare(struct ci_device *ci_dev)	/* TS-OUT ringbuffer -
 	struct ep_info *ep_out	= &ci_dev->ep_isoc_out;
 	struct ep_info *ep_in	= &ci_dev->ep_isoc_in;
 	struct urb *urb_out, *urb_in;
-
 	int uframe_size		= ep_out->u.isoc.uframe_size;
 	int transfer_size	= ep_out->u.isoc.transfer_size;
 	int max_transfers	= ep_out->u.isoc.num_transfers;
+	int min_chunk_size	= ep_out->u.isoc.min_chunk_size;
 	int act_size		= 0;
 	int i;
 
@@ -676,26 +704,31 @@ static int ts_write_CAM_prepare(struct ci_device *ci_dev)	/* TS-OUT ringbuffer -
 	if (rb_avail % TS_PACKET_SIZE)
 		pr_warn("%s : TS-packets with %zd trailing bytes\n",
 					__func__, rb_avail % TS_PACKET_SIZE);
-
-	rb_avail -= rb_avail % ep_out->u.isoc.min_chunk_size;
+	/*
+	 * write only chunks of full micro-frame size or the
+	 * incoming data is filled up with undefined data
+	 */
+	rb_avail -= rb_avail % min_chunk_size;
 
 	for (i = 0; i < max_transfers; i++) {
 		size_t left = min(transfer_size, (int)rb_avail);
-		/*
-		 * write only chunks of full micro-frame size or the
-		 * incoming data is filled up with undefined data
-		 */
-		if (left < ep_out->u.isoc.min_chunk_size)
+		int num_uf = left / uframe_size;
+
+		if (left < min_chunk_size)
 			break;
 
 		/* we have enough TS-data */
 		urb_out		= ep_out->u.isoc.transfers[i].urb;
 		urb_in		= ep_in->u.isoc.transfers[i].urb;
 		/* usb_submit_urb resets all .status and .actual_length fields */
-		urb_out->number_of_packets = left / uframe_size;
-		urb_in->number_of_packets = left / uframe_size;
+		urb_out->number_of_packets = num_uf;
+		urb_in->number_of_packets = num_uf;
+
+		urb_out->transfer_buffer_length = left;
+		urb_in->transfer_buffer_length = left;
 
 		dvb_ringbuffer_read(&ep_out->erb.buffer, urb_out->transfer_buffer, left);
+
 		rb_avail -= left;
 		act_size += left;
 	}
@@ -724,20 +757,65 @@ static int ts_write_CAM_prepare(struct ci_device *ci_dev)	/* TS-OUT ringbuffer -
 #define RB_READ_CONDITION(ep)  (dvb_ringbuffer_avail(&ep->erb.buffer) >= TS_PACKET_SIZE)
 #define RB_WRITE_CONDITION(ep) (dvb_ringbuffer_free(&ep->erb.buffer) >= TS_PACKET_SIZE)
 
+int ci_CAM_sync(struct ci_device *ci_dev, bool wait_sync_done)
+{
+	struct ep_info *ep_out = &ci_dev->ep_isoc_out;
+	struct ep_info *ep_in  = &ci_dev->ep_isoc_in;
+	int rc;
+
+	struct urb *urb_out = ep_out->u.isoc.spares[SPARE_SYNC].urb; /* spare URB */
+	struct urb *urb_in  = ep_in->u.isoc.spares[SPARE_SYNC].urb; /* spare URB */
+	#define SYNC_TS 1
+	urb_out->iso_frame_desc[0].length = SYNC_TS * TS_PACKET_SIZE; /* 1 TS */
+	#define SYNC_UF 1
+	urb_out->number_of_packets = SYNC_UF;
+	urb_in->number_of_packets  = SYNC_UF;
+
+	urb_out->transfer_buffer_length = SYNC_UF * ep_out->u.isoc.uframe_size;
+	urb_in->transfer_buffer_length = SYNC_UF * ep_in->u.isoc.uframe_size;
+
+	if (ci_dev->isoc_urbs_running)
+		if (wait_event_interruptible(ci_dev->isoc_urbs_wq,
+			!ci_dev->isoc_urbs_running) < 0)
+			return -1;
+
+	ci_dev->isoc_tsnull_pending = 1;
+	ci_dev->cam_syncs++;
+#if DEBUG_TS_SYN
+	pr_info("+++++++++ %s [%d] +++++++++", __func__, ci_dev->cam_syncs);
+#endif
+	rc = usb_submit_urb(urb_out, GFP_ATOMIC);
+	ci_dev->isoc_urbs_running++;
+	rc = usb_submit_urb(urb_in, GFP_ATOMIC);
+	ci_dev->isoc_urbs_running++;
+
+	if (urb_out->start_frame != urb_in->start_frame)
+		pr_warn("--------- %s [%d] !!! UN-SYNC !!! --------", __func__, ci_dev->cam_syncs);
+
+	if (wait_sync_done && ci_dev->isoc_urbs_running)
+		rc = wait_event_interruptible(ci_dev->isoc_urbs_wq,
+			!ci_dev->isoc_urbs_running);
+	return rc;
+}
+
 /* TS-OUT ringbuffer --> CAM --> TS-IN ringbuffer */
 static void ts_CAM_exchange(struct ci_device *ci_dev)
 {
 	int transfers;
+	mutex_lock(&ci_dev->ci_mutex);
 
 	if (ci_dev->isoc_urbs_running)
-		if (wait_event_interruptible(
-				ci_dev->isoc_urbs_wq,
-				!ci_dev->isoc_urbs_running) < 0)
+		if (wait_event_interruptible(ci_dev->isoc_urbs_wq,
+			!ci_dev->isoc_urbs_running) < 0)
 			return;
+	#define XCHG_USLEEP 2000
+	usleep_range(XCHG_USLEEP - 250,XCHG_USLEEP + 250); // needed, but why
 
 	transfers = ts_write_CAM_prepare(ci_dev); /* TS-OUT ringbuffer --> URBs */
-	if (transfers)
+	if (transfers) {
 		ts_write_CAM_submit(ci_dev, transfers); /* URBs --> CAM */
+	}
+	mutex_unlock(&ci_dev->ci_mutex);
 }
 
 /* Host --> TS-OUT ringbuffer */
@@ -814,10 +892,15 @@ static ssize_t ts_read(struct file *file, __user char *buf,
 			pr_err("%s : *** read(%zd) != avail(%zd)\n",
 						__func__, read, avail);
 #if DEBUG_TS_IO
-		pr_info("%s : *** TS{%02X} (%zu)[%zd]<%zd>\n", __func__,
-				sync, count, read, read/TS_PACKET_SIZE);
+		pr_info("%s : *** TS{} (%zu)[%zd]<%zd>\n", __func__,
+				count, read, read/TS_PACKET_SIZE);
 #endif
 	}
+#if DEBUG_TS_IO
+	else 
+		pr_info("%s : *** read(%zd) avail(%zd)\n",
+					__func__, read, avail);
+#endif
 	return read;
 }
 
@@ -865,10 +948,12 @@ void ci_reset(struct wintv_ci_dev *wintvci)
 
 	//pr_info("Reset CI Device\n");
 	ts_stop_streaming(ci_dev);
-	ci_quirks_set_defaults(ci_dev);
+	ci_dev->isoc_tsnull_pending = 1;
+	ci_dev->isoc_is_sync = 1;
 
 	ci_dev->cam_subs = 0;
 	ci_dev->cam_uframes = 0;
+	ci_dev->cam_syncs = 0;
 	ci_dev->ts_count = 0;
 	ci_dev->ts_count_timeout = jiffies + TS_COUNT_TIMEOUT;
 	ci_dev->isoc_TS_CAM = 0;

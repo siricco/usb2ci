@@ -5,6 +5,7 @@
  #
  * (+HB+) 2017-08-13
  * (+HB+) 2017-09-18 first descrambling
+ * (+HB+) 2019-11-22
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -459,11 +460,11 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg)
 			return -1;
 
 		cam_state_set(wintvci, USBCI_STATE_RST);
+		ca_thread_wakeup(ca_dev);
 		// wait until the reset is done
 		wait_event_interruptible(
 				wintvci->slot.cam_wq,
 				wintvci->slot.usbci_state != USBCI_STATE_RST);
-		ca_thread_wakeup(ca_dev);
 
 		mutex_unlock(&ca_dev->ca_ioctl_mutex);
 		break;
@@ -491,13 +492,6 @@ static int ca_ioctl(struct file *file, unsigned int cmd, void *parg)
 		if (info->num != 0) /* we have only 1 slot */
 			//return -EINVAL;
 			return -1;
-
-		// if the cam_state has not changed since last query
-		// slow down polling to the frequency of the cam_monitor events
-		if (ca_dev->ca_cam_state != wintvci->slot.cam_state)
-			wait_event_interruptible(
-					wintvci->slot.cam_wq,
-					true);
 
 		info->type  = CA_CI_LINK;
 		info->flags = wintvci->slot.cam_state;

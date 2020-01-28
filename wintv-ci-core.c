@@ -6,6 +6,7 @@
  * (+HB+) 2017-08-13
  * (+HB+) 2017-09-18 first descrambling
  * (+HB+) 2018-10-13 Version 0.3
+ * (+HB+) 2020-01-28 Version 0.3.3
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -31,7 +32,16 @@
 #include <linux/delay.h>
 #include <linux/mutex.h>
 
+#define WINTVCI_VERSION "0.3.3"
+
+/* --- P A R A M E T E R S --- */
+
 DVB_DEFINE_MOD_OPT_ADAPTER_NR(adapter_nr);
+
+static int fx2_movx_stretch = 3;
+
+module_param(fx2_movx_stretch, int, 0644);
+MODULE_PARM_DESC(fx2_movx_stretch, " Number of additional 'stretch memory cycles' for the FX2 MOVX instruction (range 0..7, default:3).");
 
 static const struct ezusb_fx_type ezusb_fx = { /* AN21.., FX */
 	.cpucs_reg = 0x7F92,
@@ -49,6 +59,7 @@ static const struct ezusb_fx_type ezusb_fx2lp = { /* FX2LP */
 };
 
 static struct usb_id_info wintv_ci_info = {
+	.is_wintvci = true,
 	.fw_ci_name = "wintvci_r%d.fw",
 	.fw_cb_name = "wintvci_cb.fw",
 	.max_ver_hw = 4,
@@ -57,6 +68,7 @@ static struct usb_id_info wintv_ci_info = {
 };
 
 static struct usb_id_info usb2_ci_info = {
+	.is_wintvci = false,
 	.fw_ci_name = "usb2ci_r%d.fw",
 	.fw_cb_name = "usb2ci_cb.fw",
 	.max_ver_hw = 4,
@@ -75,7 +87,8 @@ static struct usb_id_info usb2_ci_info = {
 
 #define USB_CTL_TIMEOUT 2000
 #define USB_CMD_TIMEOUT 5000 /* 5 seconds */
-#define USB_COR_TIMEOUT 15000 /* 15 seconds (firmware default) */
+#define USB_COR_TIMEOUT 5000 /* 5 seconds (firmware default is 15s) */
+#define USB_RDY_TIMEOUT 500  /* 0.5 seconds */
 
 static int ezusb_ctrl_write(struct wintv_ci_dev *wintvci,
 				unsigned char request,
@@ -127,6 +140,16 @@ static int ezusb_ctrl_read(struct wintv_ci_dev *wintvci,
 				USB_CTL_TIMEOUT);
 	if (rc == length)
 		memcpy(data, wintvci->ep0_buffer, length);
+	return rc;
+}
+
+static int ezusb_read_byte(struct wintv_ci_dev *wintvci, int addr, unsigned char *val)
+{
+	unsigned char buf[2];
+	int odd = addr & 0x1; // even address needed
+	int rc = ezusb_ctrl_read(wintvci, VR_A0_INTRAM, addr - odd, buf, 2) != 2;
+	if (!rc)
+		*val = buf[odd];
 	return rc;
 }
 
@@ -196,19 +219,20 @@ struct ci_cmd_info {
 	const char	*name;
 	int		on_state;
 	int		to_state;
+	int		expect_data;
 };
 
 static struct ci_cmd_info CI_CMD_INFO[] = {
-	{ "CI_00_undef", 0,0 },
-	{ "CI_10_HW_RESET",	0,		 USBCI_STATE_CIS },
-	{ "CI_20_LPDU_WRITE",	USBCI_STATE_RDY, 0 },
-	{ "CI_30_undef", 0,0 },
-	{ "CI_40_GET_CIS",	USBCI_STATE_CIS, USBCI_STATE_COR },
-	{ "CI_50_STATUS",	USBCI_STATE_RDY, 0 }, /* times out without configured link */
-	{ "CI_60_NEGOTIATE",	USBCI_STATE_LNK, USBCI_STATE_RDY },
-	{ "CI_70_WRITE_COR",	USBCI_STATE_COR, USBCI_STATE_LNK },
-	{ "CI_80_LPDU_READ",	USBCI_STATE_RDY, 0 },
-	{ "CI_90_GET_VER",	0,		 0 }
+	{ "CI_00_undef", 0,0,0 },
+	{ "CI_10_HW_RESET",	0,		 USBCI_STATE_CIS, 0 },
+	{ "CI_20_LPDU_WRITE",	USBCI_STATE_RDY, 0,		  0 },
+	{ "CI_30_undef", 0,0,0 },
+	{ "CI_40_GET_CIS",	USBCI_STATE_CIS, USBCI_STATE_COR, 1 },
+	{ "CI_50_STATUS",	USBCI_STATE_RDY, 0,		  1 },
+	{ "CI_60_NEGOTIATE",	USBCI_STATE_LNK, USBCI_STATE_RDY, 1 },
+	{ "CI_70_WRITE_COR",	USBCI_STATE_COR, USBCI_STATE_LNK, 0 },
+	{ "CI_80_LPDU_READ",	USBCI_STATE_RDY, 0,		  1 },
+	{ "CI_90_GET_VER",	0,		 0,		  1 }
 };
 
 #define DBG_CMD_MASK(c) ( 1 << ((c) >> 4) )
@@ -238,6 +262,9 @@ static int CI_send_CMD(struct wintv_ci_dev *wintvci, u8 CI_CMD_S,
 	int rem_size		= data_len;
 	int frag_len, transmitted, rc;
 
+	int timeout = (wintvci->slot.usbci_state == USBCI_STATE_RDY)
+			? USB_RDY_TIMEOUT : USB_CMD_TIMEOUT;
+
 	if (debug & SHOW_CMD_DEB)
 		print_hex_dump(KERN_DEBUG, " CI_send_CMD : ",
 					DUMP_PREFIX_OFFSET, 16, 1,
@@ -254,7 +281,7 @@ static int CI_send_CMD(struct wintv_ci_dev *wintvci, u8 CI_CMD_S,
 	bulk->pkt.hdr->xFF	= 0xff;
 
 	do {	/* run command at least once */
-		bulk->pkt.hdr->len = rem_size;
+		bulk->pkt.hdr->len = min(rem_size, 0xFF); /* any len > CA_CTRL_MAXPKT_DATA indicates "more" */
 
 		frag_len = min(rem_size, CA_CTRL_MAXPKT_DATA);
 		rem_size -= frag_len;
@@ -270,7 +297,7 @@ static int CI_send_CMD(struct wintv_ci_dev *wintvci, u8 CI_CMD_S,
 		rc = usb_bulk_msg(udev, ep->pipe,
 					bulk->pkt.buffer,
 					frag_len+4,
-					&transmitted, USB_CMD_TIMEOUT);
+					&transmitted, timeout);
 
 		if (rc) {
 			pr_err("%-20s: [%02X] rc: %d (w:%d)\n",
@@ -285,7 +312,7 @@ static int CI_send_CMD(struct wintv_ci_dev *wintvci, u8 CI_CMD_S,
 }
 
 static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
-					struct msg_reply *reply, int debug)
+					struct msg_reply *reply, int expect_data, int debug)
 {
 	struct usb_device *udev		= wintvci->udev;
 	struct ep_info *ep		= &wintvci->ca_dev.ep_intr_in;
@@ -294,9 +321,10 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 	unsigned char *msg_ptr		= (reply) ? reply->buffer : intr->msg.buffer;
 	int msg_len			= -1;
 	int rem_size			= CA_CTRL_MAXMSG;
-	int frag_len, transmitted, rc;
-	int timeout = CI_CMD_R == CI_CMD_REPLY(CI_70_WRITE_COR)
-			? 10000 + USB_COR_TIMEOUT : USB_CMD_TIMEOUT;
+	int data_len, frag_len, transmitted, rc;
+	int timeout = (wintvci->slot.usbci_state == USBCI_STATE_RDY)
+			? USB_RDY_TIMEOUT : (CI_CMD_R == CI_CMD_REPLY(CI_70_WRITE_COR))
+				? 10000 + USB_COR_TIMEOUT : USB_CMD_TIMEOUT;
 	do {
 		rc = usb_interrupt_msg(udev, ep->pipe,
 					intr->pkt.buffer,
@@ -317,17 +345,22 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 				continue; /* ignore reply from allready timedout cmd */
 		}
 
-		if (msg_len < 0) /* get the total msg-len */
-			msg_len = intr->pkt.hdr->len;
-		else if (intr->pkt.hdr->len != rem_size) {/* shpuld never happen */
-			pr_err("%20s: [%02X] data with unexpected len (%d != %d)\n",
+		data_len = intr->pkt.hdr->len;
+
+		if (msg_len < 0) { /* get the total msg-len */
+			if (!data_len && expect_data && wintvci->slot.link_layer_size == 0x100)
+				data_len = 0x100;
+			msg_len = rem_size = data_len;
+		}
+		else if (data_len != rem_size) {/* should never happen */
+			pr_err("%20s: [%02X] unexpected data len (%d != %d)\n",
 					__func__, intr->pkt.hdr->reply,
-					intr->pkt.hdr->len, rem_size);
+					data_len, rem_size);
 			return CI_ERR_10_LPDU_READ;
 		}
 
-		frag_len = min(intr->pkt.hdr->len, (unsigned char)CA_CTRL_MAXPKT_DATA);
-		rem_size = intr->pkt.hdr->len - frag_len;
+		frag_len = min(data_len, CA_CTRL_MAXPKT_DATA);
+		rem_size -= frag_len;
 
 		memcpy(msg_ptr, &intr->pkt.hdr->data, frag_len);
 		msg_ptr += frag_len;
@@ -335,7 +368,7 @@ static int CI_read_CMD_REPLY(struct wintv_ci_dev *wintvci, u8 CI_CMD_R,
 		if ((msg_len > CA_CTRL_MAXPKT_DATA) || (debug & SHOW_CMD_INF))
 			pr_info("%-20s: [%02X] %d/%d/%d\n",
 				__func__, intr->pkt.hdr->reply,
-				intr->pkt.hdr->len, frag_len, rem_size);
+				data_len, frag_len, rem_size);
 	} while (rem_size);
 
 	if (reply)
@@ -411,16 +444,26 @@ static int CI_WriteExchange(struct wintv_ci_dev *wintvci, u8 CI_CMD,
 
 	t_start = jiffies;
 	rc = CI_send_CMD(wintvci, CI_CMD_S, data, data_len, debug);
+	if (rc == CI_ERR_E0_USB && wintvci->slot.usbci_state == USBCI_STATE_RDY) {
+		ci_CAM_sync(&wintvci->ci_dev, false);
+		rc = CI_send_CMD(wintvci, CI_CMD_S, data, data_len, debug);
+	}
 	if (rc) {
 		pr_err("XW-rc(%d != %d) *** CAM-ERROR(%02X) ***\n",
 						rc, data_len, CI_CMD_S);
 		goto done;
 	}
 
-	rc = CI_read_CMD_REPLY(wintvci, CI_CMD_R, reply, debug);
+	rc = CI_read_CMD_REPLY(wintvci, CI_CMD_R, reply, cinfo->expect_data, debug);
+	if (rc == CI_ERR_E0_USB && wintvci->slot.usbci_state == USBCI_STATE_RDY) {
+		ci_CAM_sync(&wintvci->ci_dev, false);
+		rc = CI_read_CMD_REPLY(wintvci, CI_CMD_R, reply, cinfo->expect_data, debug);
+	}
+
 	t_response = jiffies_to_msecs(jiffies - t_start);
 
-	if (t_response > 50) /* typical 30ms - 33ms */
+//	if (t_response > 50) /* typical 30ms - 33ms */
+	if (t_response > 130)
 		pr_info("%-20s: [%02X/%02X] response time %u ms\n",
 				__func__, CI_CMD_S, CI_CMD_R, t_response);
 
@@ -432,8 +475,10 @@ done:
 		if (cinfo->to_state)
 			cam_state_set(wintvci, cinfo->to_state); /* set new cam-state */
 	}
-	else if (rc != CI_ERR_90_CMD_INV)
+	else if (rc != CI_ERR_90_CMD_INV && rc != CI_ERR_E0_USB)
 		cam_state_set(wintvci, USBCI_STATE_NON);
+
+	wintvci->last_exchange = jiffies;
 
 	mutex_unlock(&wintvci->usb_mutex);
 	return rc;
@@ -460,8 +505,11 @@ static int CI_40_GetCIS(struct wintv_ci_dev *wintvci)
 	struct msg_reply reply;
 
 	int rc = CI_WriteExchange(wintvci, CI_40_GET_CIS, &reply, NULL, 0);
-	if(!rc)
+	if(!rc) {
 		rc = parse_cis(reply.buffer, reply.size, &wintvci->slot);
+		if(rc)
+			cam_state_set(wintvci, USBCI_STATE_NON);
+	}
 	return rc;
 }
 
@@ -576,7 +624,8 @@ int cam_state_monitor(struct wintv_ci_dev *wintvci)
 			break;
 
 	case USBCI_STATE_RDY:
-		rc = CI_50_GetStatus(wintvci, &status);
+		if (jiffies - wintvci->last_exchange >= HZ)
+			rc = CI_50_GetStatus(wintvci, &status);
 		break;
 
 	default:
@@ -681,12 +730,21 @@ static int wintv_usb_ci_parse_firmware( const struct firmware *fw,
 	return 0;
 }
 
-static int wintv_usb_ci_apply_patch(struct wintv_ci_dev *wintvci, int addr,
+/*
+ *  F W - P A T C H E S
+ */
+
+static int wintv_usb_ci_fw_apply_patch(struct wintv_ci_dev *wintvci, int addr,
 					char *old, char *new, int len )
 {
 	char buf[USB_EP0_SIZE];
 	int rc;
-	/* verfify existing fe-code */
+
+	if (addr & 0x1 || len & 0x1) {
+		pr_err("%s : addr(0x%04X) or len(%d) not word aligned\n", __func__, addr, len);
+		return -1;
+	}
+	/* verfify existing fw-code */
 	rc = ezusb_ctrl_read(wintvci, VR_A0_INTRAM, addr, buf, len) != len;
 	if (!rc)
 		rc = strncmp(buf, old, len);
@@ -695,42 +753,86 @@ static int wintv_usb_ci_apply_patch(struct wintv_ci_dev *wintvci, int addr,
 	return rc;
 }
 
-static int wintv_usb_ci_patch_firmware(struct wintv_ci_dev *wintvci,
-					char *fw_name, int fw_ver)
+#define PPARAM3(p) p[0], p[1], sizeof(p[1])
+
+static int wintv_usb_ci_fw_patch_bcdDevice(struct wintv_ci_dev *wintvci, int fw_ver)
+{
+	/* patch bcdDevice into "WARM" firmware */
+	#define ADR_DEV_DESCRIPTOR 0x0100 // in all firmwares
+	int rc;
+	char data[2][2] = {{ 0x00,0x00 },{ 0x00,0x00 }};
+	int addr = ADR_DEV_DESCRIPTOR + 12;  // bcdDevice
+	data[1][1] = (unsigned char) fw_ver; // set fw_version in high-byte
+	rc = wintv_usb_ci_fw_apply_patch(wintvci, addr, PPARAM3(data));
+	return rc;
+}
+
+static int wintv_usb_ci_fw_patch_MOVX(struct wintv_ci_dev *wintvci,
+					bool is_wintvci, int fw_ver, unsigned char movx_stretch)
+{
+	/* CKCON MOVX stretch */
+	int rc = 0;
+	if (fw_ver == 2) { // applicable for both Wintv and Cinergy firmware
+		unsigned stretch = (movx_stretch > 7) ? 7 : movx_stretch; // cpu 48Mhz: 0: 41.7, 1: 83.3, 2: 167, 3: 250, 4: 333, 5: 417, 6: 500, 7: 583 ns
+		unsigned char val;
+		char data[2][2] = {{ 0x03,0xF5 },{ stretch,0xF5 }};
+		#define ADR_MOVX_STRETCH_WINTV 0x093A
+		#define ADR_MOVX_STRETCH_USBCI 0x0928
+		int addr = is_wintvci ? ADR_MOVX_STRETCH_WINTV : ADR_MOVX_STRETCH_USBCI;
+
+		rc = ezusb_read_byte(wintvci, addr, &val);
+		if (!rc) {
+			if (val != stretch) {
+				data[0][0] = val;
+				rc = wintv_usb_ci_fw_apply_patch(wintvci, addr, PPARAM3(data));
+			}
+			pr_info("=== MOVX stretch cycles: %d ===", stretch);
+		}
+	}
+	return rc;
+}
+
+/*
+ * be more relaxed when verifiying the CAM after setting the COR config options
+ * +++ currently only for rev.2 firmwares +++
+ */
+
+static int wintv_usb_ci_fw_patch_COR(struct wintv_ci_dev *wintvci,
+					bool is_wintvci, int fw_ver)
 {
 	int rc = 0;
 	if (fw_ver == 2) { // applicable for both Wintv and Cinergy firmware
-		/* 1. don't verify COR as the stored value my differ - ACL 2.2 */
+		int i = 0;
+		#define CTMO   (USB_COR_TIMEOUT)
+		#define CTMOH  ((CTMO >> 8) & 0xFF)
+		#define CTMOL  (CTMO & 0xFF)
+		/* 1. don't verify the written COR value - the register value my be different (ACL 2.2) */
 		#define ADR_P2030 0x2030
 		char p2030[2][4] = {{ 0x65,0x50,0x70,0x61 }, { 0xE4,0x00,0x00,0x00 }};
-		/* 2. modify timeout (MatrixAir...) for late response */
-		#define CTMO    (USB_COR_TIMEOUT)
-		#define CTMOH   ((CTMO >> 8) & 0xFF)
-		#define CTMOL   (CTMO & 0xFF)
+		/* 2. modify timeout (for e.g. MatrixAir) ... */
 		#define ADR_P204A 0x204A
 		char p204A[2][4] = {{ 0x7D,0x98,0x7C,0x3A },{ 0x7D, CTMOL, 0x7C, CTMOH }};
-		/* but ignore missing FREE bit at least */
+		/* ... as we ignore missing FREE bit anyway */
 		#define ADR_P2064 0x2064
 		char p2064[2][2] = {{ 0x80,0x32 },{ 0x0D, 0x00 }};
 
-		pr_info("*** applying patches to firmware: %s ***\n", fw_name);
-		#define PARAM3(p) p[0], p[1], sizeof(p[1])
+		pr_info("*** applying COR patches ***\n");
 		do {
-			rc = wintv_usb_ci_apply_patch(wintvci, ADR_P2030, PARAM3(p2030));
+			rc = wintv_usb_ci_fw_apply_patch(wintvci, ADR_P2030, PPARAM3(p2030)); i++;
 			if (rc) break;
-			rc = wintv_usb_ci_apply_patch(wintvci, ADR_P204A, PARAM3(p204A));
+			rc = wintv_usb_ci_fw_apply_patch(wintvci, ADR_P204A, PPARAM3(p204A)); i++;
 			if (rc) break;
-			rc = wintv_usb_ci_apply_patch(wintvci, ADR_P2064, PARAM3(p2064));
+			rc = wintv_usb_ci_fw_apply_patch(wintvci, ADR_P2064, PPARAM3(p2064)); i++;
 			if (rc) break;
 		} while (0);
-		if(rc)
-		    pr_info("* %s\n", "--- FAILED ---");
+		if (rc)
+			pr_info("+++ FAILED (#%d) ***\n", i);
 	}
-	return -rc;
+	return rc;
 }
 
 static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
-					char *fw_name, int fw_ver)
+				char *fw_name, bool is_wintvci, int fw_ver)
 {
 	const struct firmware *fw = NULL;
 	struct usb_device *udev = wintvci->udev;
@@ -770,7 +872,7 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 			struct fw_block_header *fwbh = (struct fw_block_header *) cptr;
 
 			if (fwbh->cadr >= wintvci->info->fx->internal_ram_size) {
-				//pr_info("extram adr 0x%04X, len 0x%X bytes\n",fwbh->cadr, fwbh->clen);
+				//pr_info("extram addr 0x%04X, len 0x%X bytes\n",fwbh->cadr, fwbh->clen);
 
 				rc = ezusb_ctrl_write( wintvci,
 					VR_A3_EXTRAM, fwbh->cadr, &fwbh->cdata, fwbh->clen );
@@ -789,7 +891,7 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 		struct fw_block_header *fwbh = (struct fw_block_header *) cptr;
 
 		if (fwbh->cadr < wintvci->info->fx->internal_ram_size) {
-			//pr_info("intram adr 0x%04X, len 0x%X bytes\n",fwbh->cadr, fwbh->clen);
+			//pr_info("intram addr 0x%04X, len 0x%X bytes\n",fwbh->cadr, fwbh->clen);
 
 			rc = ezusb_ctrl_write( wintvci,
 				VR_A0_INTRAM, fwbh->cadr, &fwbh->cdata, fwbh->clen );
@@ -800,7 +902,10 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 		}
 	}
 	/////////////////////////////////////////////
-	wintv_usb_ci_patch_firmware(wintvci, fw_name, fw_ver);
+	if (fw_ver > 0) {
+		wintv_usb_ci_fw_patch_COR(wintvci, is_wintvci, fw_ver);
+		wintv_usb_ci_fw_patch_bcdDevice(wintvci, fw_ver);
+	}
 	/////////////////////////////////////////////
 	EZ_CPU_START(wintvci,wintvci->info->fx);
 
@@ -1022,6 +1127,8 @@ static int wintv_usb_ci_adapter_attach(struct wintv_ci_dev *wintvci) {
 	wintvci->slot.cis_valid = 0;
 	wintvci->slot.usbci_state = 0;
 	wintvci->slot.cam_state = 0;
+	wintvci->last_exchange = 0;
+
 	init_waitqueue_head(&wintvci->slot.cam_wq);
 	mutex_init(&wintvci->usb_mutex);
 
@@ -1043,7 +1150,8 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 
 	struct usb_device *udev = usb_get_dev(interface_to_usbdev(intf));
 	struct usb_id_info *info = (struct usb_id_info *) id->driver_info;
-	u16 hw_version = le16_to_cpu(udev->descriptor.bcdDevice);
+	u16 hw_version = le16_to_cpu(udev->descriptor.bcdDevice) & 0xFF; // only in cold state
+	u16 fw_version = le16_to_cpu(udev->descriptor.bcdDevice) >> 8;   // only in warm state
 	/****/
 	wintvci = ci_kmalloc(sizeof(*wintvci), 1, (char *)__func__);
 	if (!wintvci)
@@ -1052,14 +1160,15 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 	wintvci->udev     = udev;
 	wintvci->intf     = intf;
 	wintvci->info     = info;
-	wintvci->fw_state = (hw_version) ? FW_STATE_COLD : FW_STATE_WARM;
+	wintvci->fw_state = hw_version ? FW_STATE_COLD : FW_STATE_WARM;
 	/****/
+	pr_info("Loading WinTV-CI driver Ver. %s\n", WINTVCI_VERSION);
 
-	pr_info("Found USB-CI device %04x:%04x (Ver.%d) in %s state\n",
+	pr_info("Found USB-CI device %04x:%04x (Ver.%d/%d) in %s state\n",
 		le16_to_cpu(udev->descriptor.idVendor),
 		le16_to_cpu(udev->descriptor.idProduct),
-		le16_to_cpu(udev->descriptor.bcdDevice),
-		(hw_version) ? "cold" : "warm");
+		hw_version, fw_version,
+		(wintvci->fw_state == FW_STATE_COLD) ? "cold" : "warm");
 
 	if (udev->product)
 		pr_info("%20s : %s\n", "Product", udev->product);
@@ -1070,20 +1179,19 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 
 	/* ------ COLD ------ */
 	if (wintvci->fw_state == FW_STATE_COLD) {
-		int fw_ver = hw_version;
-
 		if (hw_version > info->max_ver_hw) {
 			pr_err("Unexpected hardware version %d\n", hw_version);
 			goto error;
 		}
 
-		if (fw_ver > info->max_ver_fw) /* for Cinergy CI USB */
-			fw_ver = info->max_ver_fw; /* same FW for versions 3 and 4 */
+		fw_version = hw_version;
+		if (fw_version > info->max_ver_fw) /* for Cinergy CI USB */
+			fw_version = info->max_ver_fw; /* same FW for versions 3 and 4 */
 		/*
 		 * First load EZUSB firmware with support of 0xA3 requests
 		 * and show some hardware-info. No automatic USB-renumbering !
 		 */
-		rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name, 0);
+		rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name, info->is_wintvci, 0);
 		if (rc)
 			goto error;
 		wintvci->fw_state = FW_STATE_EZUSB;
@@ -1093,10 +1201,10 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 		/*
 		 * Now load the matching CI-firmware - automatic USB renumbering !
 		 */
-		snprintf(fw_name, sizeof(fw_name),info->fw_ci_name, fw_ver);
+		snprintf(fw_name, sizeof(fw_name), info->fw_ci_name, fw_version);
 		pr_info("CI-firmware %s selected\n", fw_name);
 
-		rc = wintv_usb_ci_load_firmware(wintvci, fw_name, fw_ver);
+		rc = wintv_usb_ci_load_firmware(wintvci, fw_name, info->is_wintvci, fw_version);
 		if (rc)
 			goto error;
 		/* Now the USB-device disconnects and re-appears in warm state */
@@ -1108,7 +1216,14 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 	usb_set_intfdata(intf, wintvci);
 
 	/* ------ WARM ------ */
-	if (wintvci->fw_state == FW_STATE_WARM ) {
+	if (wintvci->fw_state == FW_STATE_WARM) {
+		// firmware parameter
+		EZ_CPU_STOP(wintvci,wintvci->info->fx);
+		rc = wintv_usb_ci_fw_patch_MOVX(wintvci, info->is_wintvci, fw_version, fx2_movx_stretch);
+		EZ_CPU_START(wintvci,wintvci->info->fx);
+		if (rc)
+			goto error;
+		//
 		rc = wintv_usb_ci_setup_endpoints(wintvci);
 		if (rc)
 			goto error;
@@ -1175,6 +1290,7 @@ static struct usb_device_id wintv_usb_ci_table [] = {
 	/* SmarDTV / Mascom - SmarCAM Adapter */
 	{ USB_DEVICE( 0x2040, 0x1100 ), /* Hauppauge WintTV-CI USB */
 	    .driver_info = (unsigned long) &wintv_ci_info
+//	    .driver_info = (unsigned long) &usb2_ci_info
 	},
 	{ USB_DEVICE( 0x1B0D, 0x5F10 ), /* SmarDTV */
 	    .driver_info = (unsigned long) &usb2_ci_info
@@ -1198,7 +1314,7 @@ MODULE_DEVICE_TABLE (usb, wintv_usb_ci_table);
 
 MODULE_AUTHOR("Helmut Binder");
 MODULE_DESCRIPTION("Hauppauge WinTV-CI USB2 Common Interface driver");
-MODULE_VERSION("0.3.1a");
+MODULE_VERSION(WINTVCI_VERSION);
 MODULE_LICENSE("GPL");
 
 static struct usb_driver wintv_usb_ci_driver = {

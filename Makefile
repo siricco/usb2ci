@@ -2,4 +2,4 @@ wintv-usb2ci-objs := wintv-ci-ca.o wintv-ci-ci.o wintv-ci-en50221.o wintv-ci-pcm
 
 obj-m += wintv-usb2ci.o
 
-ccflags-y += -Idrivers/media/dvb-core/
+ccflags-y += -Wall -Idrivers/media/dvb-core/
