@@ -1,0 +1,19 @@
+# wintv-ci options
+# 2020-01-28
+
+#options wintv_usb2ci adapter_nr=5
+#options wintv_usb2ci uf_triggers_submission=96 # for minisatip
+options wintv_usb2ci use_dma_coherent=0
+options wintv_usb2ci show_ts_bitrate=1
+#options wintv_usb2ci show_tpdu_info=1
+
+# Alphacrypt 3.28 +
+# Neotion (Irdeto) ++
+# SMIT (irdeto) +++
+#options wintv_usb2ci dummy_half_uframes=3
+#options wintv_usb2ci fx2_movx_stretch=6
+
+# SMIT (SimpliTV) +++
+# SMIT (irdeto) +++
+options wintv_usb2ci dummy_half_uframes=2
+options wintv_usb2ci fx2_movx_stretch=6
