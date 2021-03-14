@@ -8,6 +8,7 @@
  * (+HB+) 2018-10-13 Version 0.3
  * (+HB+) 2020-01-28 Version 0.3.3
  * (+HB+) 2020-11-09 Version 0.3.4_pre1
+ * (+HB+) 2021-03-13 Version 0.3.4_pre2
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -33,7 +34,7 @@
 #include <linux/delay.h>
 #include <linux/mutex.h>
 
-#define WINTVCI_VERSION "0.3.4pre1"
+#define WINTVCI_VERSION "0.3.4pre2"
 
 /* --- P A R A M E T E R S --- */
 
@@ -43,6 +44,17 @@ static int fx2_movx_stretch = 3;
 
 module_param(fx2_movx_stretch, int, 0644);
 MODULE_PARM_DESC(fx2_movx_stretch, " Number of additional 'stretch memory cycles' for the FX2 MOVX instruction (range 0..7, default:3).");
+
+#define HW_VENDOR_HAUPPAUGE 1
+#define HW_VENDOR_SMARDTV   2
+
+static int force_vendor = 0;
+static int force_version = 0;
+
+module_param(force_vendor, int, 0644);
+module_param(force_version, int, 0644);
+MODULE_PARM_DESC(force_vendor, " Force hardware vendor (0: Auto, 1: Hauppauge 2: SmartDTV+TerraTec, default:0).");
+MODULE_PARM_DESC(force_version, " Force firmware version (0: Auto, 1..4: Version, default:0).");
 
 static const struct ezusb_fx_type ezusb_fx = { /* AN21.., FX */
 	.cpucs_reg = 0x7F92,
@@ -60,7 +72,8 @@ static const struct ezusb_fx_type ezusb_fx2lp = { /* FX2LP */
 };
 
 static struct usb_id_info wintv_ci_info = {
-	.is_wintvci = true,
+	.vendor = HW_VENDOR_HAUPPAUGE,
+	.vendor_name = "Hauppauge",
 	.fw_ci_name = "wintvci_r%d.fw",
 	.fw_cb_name = "wintvci_cb.fw",
 	.max_ver_hw = 4,
@@ -69,7 +82,8 @@ static struct usb_id_info wintv_ci_info = {
 };
 
 static struct usb_id_info usb2_ci_info = {
-	.is_wintvci = false,
+	.vendor = HW_VENDOR_SMARDTV,
+	.vendor_name = "SmarDTV,TerraTec",
 	.fw_ci_name = "usb2ci_r%d.fw",
 	.fw_cb_name = "usb2ci_cb.fw",
 	.max_ver_hw = 4,
@@ -788,7 +802,7 @@ static int wintv_usb_ci_fw_patch_bcdDevice(struct wintv_ci_dev *wintvci, int fw_
 }
 
 static int wintv_usb_ci_fw_patch_MOVX(struct wintv_ci_dev *wintvci,
-					bool is_wintvci, int fw_ver, unsigned char movx_stretch)
+					int vendor, int fw_ver, unsigned char movx_stretch)
 {
 	/* CKCON MOVX stretch */
 	int rc = 0;
@@ -798,7 +812,7 @@ static int wintv_usb_ci_fw_patch_MOVX(struct wintv_ci_dev *wintvci,
 		char data[2][2] = {{ 0x03,0xF5 },{ stretch,0xF5 }};
 		#define ADR_MOVX_STRETCH_WINTV 0x093A
 		#define ADR_MOVX_STRETCH_USBCI 0x0928
-		int addr = is_wintvci ? ADR_MOVX_STRETCH_WINTV : ADR_MOVX_STRETCH_USBCI;
+		int addr = (vendor == HW_VENDOR_HAUPPAUGE) ? ADR_MOVX_STRETCH_WINTV : ADR_MOVX_STRETCH_USBCI;
 
 		rc = ezusb_read_byte(wintvci, addr, &val);
 		if (!rc) {
@@ -818,7 +832,7 @@ static int wintv_usb_ci_fw_patch_MOVX(struct wintv_ci_dev *wintvci,
  */
 
 static int wintv_usb_ci_fw_patch_COR(struct wintv_ci_dev *wintvci,
-					bool is_wintvci, int fw_ver)
+					int vendor, int fw_ver)
 {
 	int rc = 0;
 	if (fw_ver == 2) { // applicable for both Wintv and Cinergy firmware
@@ -852,7 +866,7 @@ static int wintv_usb_ci_fw_patch_COR(struct wintv_ci_dev *wintvci,
 }
 
 static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
-				char *fw_name, bool is_wintvci, int fw_ver)
+				char *fw_name, int vendor, int fw_ver)
 {
 	const struct firmware *fw = NULL;
 	struct usb_device *udev = wintvci->udev;
@@ -923,7 +937,7 @@ static int wintv_usb_ci_load_firmware(  struct wintv_ci_dev *wintvci,
 	}
 	/////////////////////////////////////////////
 	if (fw_ver > 0) {
-		wintv_usb_ci_fw_patch_COR(wintvci, is_wintvci, fw_ver);
+		wintv_usb_ci_fw_patch_COR(wintvci, vendor, fw_ver);
 		wintv_usb_ci_fw_patch_bcdDevice(wintvci, fw_ver);
 	}
 	/////////////////////////////////////////////
@@ -1203,7 +1217,24 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 			pr_err("Unexpected hardware version %d\n", hw_version);
 			goto error;
 		}
-
+		/* --- override hw/fw --- */
+		if (force_vendor && force_vendor != wintvci->info->vendor) {
+			if (force_vendor == HW_VENDOR_HAUPPAUGE || force_vendor == HW_VENDOR_SMARDTV) {
+				wintvci->info = (force_vendor == HW_VENDOR_HAUPPAUGE) ? &wintv_ci_info : &usb2_ci_info;
+				pr_info("*** Forcing Vendor: %s", wintvci->info->vendor_name);
+			}
+			else
+				pr_err("!!! Error: force_vendor: %d !!!", force_vendor);
+		}
+		if (force_version && force_version != hw_version) {
+			if (force_version > 0 && force_version <= info->max_ver_hw) {
+				hw_version = force_version;
+				pr_info("*** Forcing Version: %d", hw_version);
+			}
+			else
+				pr_err("!!! Error: force_version: %d !!!", force_version);
+		}
+		/* --- */
 		fw_version = hw_version;
 		if (fw_version > info->max_ver_fw) /* for Cinergy CI USB */
 			fw_version = info->max_ver_fw; /* same FW for versions 3 and 4 */
@@ -1211,7 +1242,7 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 		 * First load EZUSB firmware with support of 0xA3 requests
 		 * and show some hardware-info. No automatic USB-renumbering !
 		 */
-		rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name, info->is_wintvci, 0);
+		rc = wintv_usb_ci_load_firmware(wintvci,(char *)info->fw_cb_name, info->vendor, 0);
 		if (rc)
 			goto error;
 		wintvci->fw_state = FW_STATE_EZUSB;
@@ -1224,7 +1255,7 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 		snprintf(fw_name, sizeof(fw_name), info->fw_ci_name, fw_version);
 		pr_info("CI-firmware %s selected\n", fw_name);
 
-		rc = wintv_usb_ci_load_firmware(wintvci, fw_name, info->is_wintvci, fw_version);
+		rc = wintv_usb_ci_load_firmware(wintvci, fw_name, info->vendor, fw_version);
 		if (rc)
 			goto error;
 		/* Now the USB-device disconnects and re-appears in warm state */
@@ -1239,7 +1270,7 @@ static int wintv_usb_ci_probe(struct usb_interface *intf,
 	if (wintvci->fw_state == FW_STATE_WARM) {
 		// firmware parameter
 		EZ_CPU_STOP(wintvci,wintvci->info->fx);
-		rc = wintv_usb_ci_fw_patch_MOVX(wintvci, info->is_wintvci, fw_version, fx2_movx_stretch);
+		rc = wintv_usb_ci_fw_patch_MOVX(wintvci, info->vendor, fw_version, fx2_movx_stretch);
 		EZ_CPU_START(wintvci,wintvci->info->fx);
 		if (rc)
 			goto error;

@@ -78,9 +78,10 @@ int parse_cis(unsigned char *cis, int size, struct slot_info *s_info) {
 
 	memset(&c_v1,0,sizeof(c_v1));
 
-//	print_hex_dump(KERN_DEBUG, " CIS : ", DUMP_PREFIX_OFFSET, 16, 1,
-//			cis, size, 1);
-
+#if CIS_DEBUG
+	print_hex_dump(KERN_DEBUG, " CIS : ", DUMP_PREFIX_OFFSET, 16, 1,
+			cis, size, 1);
+#endif
 	for (i = 0, i_todo = size; i_todo; i = i_next) {
 
 		tpl_code = cis[i++];

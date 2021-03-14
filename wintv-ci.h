@@ -5,6 +5,7 @@
  #
  * (+HB+) 2017-08-13
  * (+HB+) 2019-11-11
+ * (+HB+) 2021-03-13 Version 0.3.4_pre2
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -52,7 +53,8 @@ struct ezusb_fx_type {
 };
 
 struct usb_id_info {
-	bool is_wintvci;
+	int vendor;
+	const char *vendor_name;
 	const char *fw_ci_name;
 	const char *fw_cb_name;
 	int max_ver_hw;
