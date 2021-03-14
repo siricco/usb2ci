@@ -9,6 +9,7 @@
  * (+HB+) 2018-03-04 Version 0.2
  * (+HB+) 2018-10-13 Version 0.3
  * (+HB+) 2020-01-28 Version 0.3.3
+ * (+HB+) 2020-11-09 Version 0.3.4_pre1
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -72,7 +73,7 @@ static int show_ts_bitrate = 0;
 module_param(show_ts_bitrate, int, 0644);
 MODULE_PARM_DESC(show_ts_bitrate, " Report the current TS datarate (every 10 secs) (default:off).");
 
-static int dummy_half_uframes = 1;
+static int dummy_half_uframes = 2;
 
 module_param(dummy_half_uframes, int, 0644);
 MODULE_PARM_DESC(dummy_half_uframes, " Quirk to reliable bring the last 2 TS packets of each USB-transfer into the CAM (0..4, default:2).");
@@ -82,6 +83,15 @@ static int uf_triggers_submission = ISOC_MIN_UF_SUBMIT;
 module_param(uf_triggers_submission, int, 0644);
 MODULE_PARM_DESC(uf_triggers_submission, " Set the minimum data in USB microframes which triggera URB submission to the CAM (8..969, default:8).");
 					// Hint: with minisatip use uf_triggers_submission=96 to transmit around 15 URBs/s for each 10Mbit/s of TS-Data
+static int urb_iso_asap = 1;
+
+module_param(urb_iso_asap, int, 0644);
+MODULE_PARM_DESC(urb_iso_asap, " URB_ISO_ASAP isochronous tranfer scheduling policy (0:off, 1:first, 2:all, default:first).");
+
+static int sync_urb_to_uframe = 0;
+
+module_param(sync_urb_to_uframe, int, 0644);
+MODULE_PARM_DESC(sync_urb_to_uframe, " start URB transmissions at the beginning of an uframe boundary (default:off).");
 
 /* --- R I N G B U F F E R --- */
 
@@ -148,12 +158,7 @@ static int isoc_tsnull_setup(unsigned char *buf, int ts_num)
 	return 0;
 }
 
-static void isoc_tsnull_free(struct ci_device *ci_dev)
-{
-	;
-}
-
-static int isoc_tsnull_alloc(struct ci_device *ci_dev)
+static int isoc_tsnull_init(struct ci_device *ci_dev)
 {
 	struct ep_info *ep_out = &ci_dev->ep_isoc_out;/* spare URB */
 	struct isoc_info *isoc = &ep_out->u.isoc;
@@ -323,8 +328,7 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 		urb->interval			= 1 << (ep->binterval - 1); /* 1 << (1 - 1) = 1 */
 
 		urb->complete			= ts_urb_complete;
-		urb->transfer_flags		= URB_ISO_ASAP;
-		//urb->transfer_flags		= 0;
+		urb->transfer_flags		= urb_iso_asap > 1 ? URB_ISO_ASAP : 0;
 
 		if (use_dma_coherent) {
 			urb->transfer_flags	|= URB_NO_TRANSFER_DMA_MAP;
@@ -340,14 +344,20 @@ static int ci_isoc_setup(struct ep_info *ep, struct usb_device *udev)
 			uframe_ofs += uframe_len;
 		}
 	}
+
+	if (urb_iso_asap == 1) { /* set ASAP only on first URB */
+		struct urb *urb = isoc->urbs[0].urb;
+		urb->transfer_flags |= URB_ISO_ASAP;
+		urb = isoc->spares[SPARE_SYNC].urb;
+		urb->transfer_flags |= URB_ISO_ASAP;
+	}
+
 	return 0;
 }
 
 static void ci_isoc_exit(struct ci_device *ci_dev)
 {
 	struct ep_info *ep;
-
-	isoc_tsnull_free(ci_dev);
 
 	ep = &ci_dev->ep_isoc_in;
 	ci_isoc_free(ep);
@@ -389,7 +399,7 @@ static int ci_isoc_init(struct ci_device *ci_dev)
 	ci_isoc_setup(ep, udev);
 
 	/* TS-NULL OUT */
-	rc = isoc_tsnull_alloc(ci_dev);
+	rc = isoc_tsnull_init(ci_dev);
 
 	return rc;
 }
@@ -453,7 +463,7 @@ static int ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 			lost++;
 		}
 
-		if (ci_dev->isoc_tsnull_pending) { /* filter out the TS-null packets */
+		if (dummy_half_uframes || ci_dev->isoc_tsnull_pending) { /* filter out the TS-null packets */
 			unsigned char *ts = uf;
 			int ts_num = isoc->uframe_size / TS_PACKET_SIZE;
 			int j;
@@ -568,7 +578,6 @@ static void ts_urb_complete(struct urb *urb)
 		if (dir == USB_DIR_IN && rd_size)
 			wake_up_interruptible(&ep->erb.wq); /* ep-in waitqueue RB --> HOST*/
 	}
-
 	wake_up_interruptible(&ci_dev->isoc_urbs_wq); /* urb waitqueue */
 
 #if DEBUG_TS_IO
@@ -589,10 +598,9 @@ static int ts_write_CAM_submit(struct ci_device *ci_dev, int transfers) /* URBs 
 	for (i = 0; i < transfers; i++) {
 		urb_out	= ep_out->u.isoc.transfers[i].urb;
 		urb_in	= ep_in->u.isoc.transfers[i].urb;
-#define SPINLOCK 1
-#if SPINLOCK
+
 		/* start the first urb transfers at the very beginning of a new uframe! */
-		if (i == 0) {
+		if (i == 0 && sync_urb_to_uframe) {
 			int cf = usb_get_current_frame_number(ci_dev->wintvci->udev);
 			int nf = 0;
 			int cnt = 0;
@@ -607,7 +615,7 @@ static int ts_write_CAM_submit(struct ci_device *ci_dev, int transfers) /* URBs 
 			} while (nf == cf); // loops up to 1ms
 			//if (cnt > 200) pr_info("%s : frame-number:%d, %d\n", __func__, nf << 3, cnt);
 		}
-#endif
+
 		/* submit out-urb - at first */
 		rc = usb_submit_urb(urb_out, GFP_ATOMIC);
 		if (rc < 0)
@@ -621,10 +629,10 @@ static int ts_write_CAM_submit(struct ci_device *ci_dev, int transfers) /* URBs 
 			pr_warn("%s : Could not submit TS-IN URB[%d/%d]: (%d)\n",
 						__func__, i, transfers, rc);
 		ci_dev->isoc_urbs_running++;
-#if SPINLOCK
-		if (i == 0)
+
+		if (i == 0 && sync_urb_to_uframe)
 			spin_unlock_irqrestore(&ci_dev->ci_lock, ci_dev->ci_lock_flags);
-#endif
+
 	}
 	if (i) {
 		int sfd = urb_out->start_frame - urb_in->start_frame;
@@ -637,7 +645,6 @@ static int ts_write_CAM_submit(struct ci_device *ci_dev, int transfers) /* URBs 
 			;
 		}
 		if (dummy_half_uframes) {
-			ci_dev->isoc_tsnull_pending = 1;
 			urb_out = ep_out->u.isoc.spares[SPARE_NULL].urb;/* spare URB */
 			urb_in  = ep_in->u.isoc.spares[SPARE_NULL].urb;/* spare URB */
 
@@ -784,14 +791,18 @@ int ci_CAM_sync(struct ci_device *ci_dev, bool wait_sync_done)
 #if DEBUG_TS_SYN
 	pr_info("+++++++++ %s [%d] +++++++++", __func__, ci_dev->cam_syncs);
 #endif
+#define SYNC_OUT 1
+#if SYNC_OUT
 	rc = usb_submit_urb(urb_out, GFP_ATOMIC);
 	ci_dev->isoc_urbs_running++;
+#endif
 	rc = usb_submit_urb(urb_in, GFP_ATOMIC);
 	ci_dev->isoc_urbs_running++;
 
+#if SYNC_OUT
 	if (urb_out->start_frame != urb_in->start_frame)
 		pr_warn("--------- %s [%d] !!! UN-SYNC !!! --------", __func__, ci_dev->cam_syncs);
-
+#endif
 	if (wait_sync_done && ci_dev->isoc_urbs_running)
 		rc = wait_event_interruptible(ci_dev->isoc_urbs_wq,
 			!ci_dev->isoc_urbs_running);
@@ -802,12 +813,14 @@ int ci_CAM_sync(struct ci_device *ci_dev, bool wait_sync_done)
 static void ts_CAM_exchange(struct ci_device *ci_dev)
 {
 	int transfers;
+
 	mutex_lock(&ci_dev->ci_mutex);
 
 	if (ci_dev->isoc_urbs_running)
 		if (wait_event_interruptible(ci_dev->isoc_urbs_wq,
 			!ci_dev->isoc_urbs_running) < 0)
-			return;
+			goto exit;
+
 	#define XCHG_USLEEP 2000
 	usleep_range(XCHG_USLEEP - 250,XCHG_USLEEP + 250); // needed, but why
 
@@ -815,6 +828,7 @@ static void ts_CAM_exchange(struct ci_device *ci_dev)
 	if (transfers) {
 		ts_write_CAM_submit(ci_dev, transfers); /* URBs --> CAM */
 	}
+exit:
 	mutex_unlock(&ci_dev->ci_mutex);
 }
 
@@ -948,7 +962,7 @@ void ci_reset(struct wintv_ci_dev *wintvci)
 
 	//pr_info("Reset CI Device\n");
 	ts_stop_streaming(ci_dev);
-	ci_dev->isoc_tsnull_pending = 1;
+	ci_dev->isoc_tsnull_pending = 0;
 	ci_dev->isoc_is_sync = 1;
 
 	ci_dev->cam_subs = 0;
