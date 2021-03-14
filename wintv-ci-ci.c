@@ -10,6 +10,7 @@
  * (+HB+) 2018-10-13 Version 0.3
  * (+HB+) 2020-01-28 Version 0.3.3
  * (+HB+) 2020-11-09 Version 0.3.4_pre1
+ * (+HB+) 2021-03-14 Version 0.3.4_pre3
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -466,12 +467,14 @@ static int ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 		if (dummy_half_uframes || ci_dev->isoc_tsnull_pending) { /* filter out the TS-null packets */
 			unsigned char *ts = uf;
 			int ts_num = isoc->uframe_size / TS_PACKET_SIZE;
-			int j;
+			int j, sync = 0;
 			for (j = 0; j < ts_num; j++, ts += TS_PACKET_SIZE) {
 				u32 mark = *(u32 *)(ts + 4);
 #if DEBUG_TS_IN
 				pr_info(" * TS[%d/%d] %*ph\n", i, j, 8, ts);
 #endif
+				if (*ts == 0x47)
+					sync++;
 				if (mark == TS_NULL_MARK32) { /* found the marker at offset 4 */
 					mark = cpu_to_be32(*(u32 *)ts);
 					if ( ((mark & 0x00FFFFF0) == TS_NULL_MARK1) ||	/* our special dummy-TS */
@@ -488,6 +491,8 @@ static int ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 				}
 				if (*ts != 0x47) {
 					int s;
+					if (!ci_dev->log_unsync)
+						continue;
 					if (*(u32 *)ts == *(u32 *)(ts + 4)) 
 						continue; // mixed-up memory "echo" packet - no error !
 					for (s = 0; s < TS_PACKET_SIZE; s++) {
@@ -502,6 +507,7 @@ static int ts_read_CAM_complete(struct urb *urb)	/* CAM --> TS-IN ringbuffer */
 				rb_free -= TS_PACKET_SIZE;
 				act_size += TS_PACKET_SIZE;
 			}
+			ci_dev->log_unsync = !sync; // log after full fail
 		}
 		else {
 			if (*uf != 0x47)
@@ -972,6 +978,7 @@ void ci_reset(struct wintv_ci_dev *wintvci)
 	ci_dev->ts_count_timeout = jiffies + TS_COUNT_TIMEOUT;
 	ci_dev->isoc_TS_CAM = 0;
 	ci_dev->isoc_TS_CAM_total = 0;
+	ci_dev->log_unsync = 0;
 }
 
 void ci_detach(struct wintv_ci_dev *wintvci)

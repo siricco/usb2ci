@@ -34,7 +34,7 @@
 #include <linux/delay.h>
 #include <linux/mutex.h>
 
-#define WINTVCI_VERSION "0.3.4pre2"
+#define WINTVCI_VERSION "0.3.4pre3"
 
 /* --- P A R A M E T E R S --- */
 

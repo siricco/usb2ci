@@ -230,6 +230,7 @@ struct ci_device {
 	unsigned long	ts_count_timeout;
 	int		isoc_TS_CAM;
 	int		isoc_TS_CAM_total;
+	int		log_unsync;
 };
 
 #define FW_STATE_COLD  1 /* no firmware loaded */
