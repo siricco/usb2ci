@@ -604,25 +604,25 @@ int cam_state_monitor(struct wintv_ci_dev *wintvci)
 		if (rc)
 			break;
 		ci_reset(wintvci);
-
+                // fallthrough
 	case USBCI_STATE_CIS:
 		rc = CI_40_GetCIS(wintvci);
 		if (rc)
 			break;
-
+                // fallthrough
 	case USBCI_STATE_COR:
 		rc = CI_70_WriteCOR(wintvci,
 					wintvci->slot.config_base,
 					wintvci->slot.config_option);
 		if (rc)
 			break;
-
+                // fallthrough
 	case USBCI_STATE_LNK:
 		link_size = CA_LINK_LAYER_SIZE;
 		rc = CI_60_Negotiate(wintvci, link_size);
 		if (rc)
 			break;
-
+                // fallthrough
 	case USBCI_STATE_RDY:
 		if (jiffies - wintvci->last_exchange >= HZ)
 			rc = CI_50_GetStatus(wintvci, &status);
