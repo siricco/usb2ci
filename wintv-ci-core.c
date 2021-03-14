@@ -7,6 +7,7 @@
  * (+HB+) 2017-09-18 first descrambling
  * (+HB+) 2018-10-13 Version 0.3
  * (+HB+) 2020-01-28 Version 0.3.3
+ * (+HB+) 2020-11-09 Version 0.3.4_pre1
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -32,7 +33,7 @@
 #include <linux/delay.h>
 #include <linux/mutex.h>
 
-#define WINTVCI_VERSION "0.3.3"
+#define WINTVCI_VERSION "0.3.4pre1"
 
 /* --- P A R A M E T E R S --- */
 
@@ -422,6 +423,7 @@ static int CI_WriteExchange(struct wintv_ci_dev *wintvci, u8 CI_CMD,
 
 	struct ci_cmd_info *cinfo = &CI_CMD_INFO[CI_CMD_S >> 4];
 
+	struct ci_device *ci_dev = &wintvci->ci_dev;
 	unsigned long t_start;
 	unsigned int t_response;
 	int debug_mask, debug;
@@ -443,6 +445,15 @@ static int CI_WriteExchange(struct wintv_ci_dev *wintvci, u8 CI_CMD,
 		((debug_mask & INF_CMD_Y) ? SHOW_CMD_INF : 0);
 
 	t_start = jiffies;
+
+	if (ci_dev->isoc_urbs_running)
+		if (wait_event_interruptible(ci_dev->isoc_urbs_wq,
+			!ci_dev->isoc_urbs_running) < 0)
+			return CI_ERR_60_TIMEOUT;
+
+	if (ci_dev->isoc_urbs_running)
+		pr_info(">>> isoc_urbs_running[%02X] %d", CI_CMD_S, ci_dev->isoc_urbs_running);
+
 	rc = CI_send_CMD(wintvci, CI_CMD_S, data, data_len, debug);
 	if (rc == CI_ERR_E0_USB && wintvci->slot.usbci_state == USBCI_STATE_RDY) {
 		ci_CAM_sync(&wintvci->ci_dev, false);
@@ -453,6 +464,15 @@ static int CI_WriteExchange(struct wintv_ci_dev *wintvci, u8 CI_CMD,
 						rc, data_len, CI_CMD_S);
 		goto done;
 	}
+
+
+	if (ci_dev->isoc_urbs_running)
+		if (wait_event_interruptible(ci_dev->isoc_urbs_wq,
+			!ci_dev->isoc_urbs_running) < 0)
+			return CI_ERR_60_TIMEOUT;
+
+	if (ci_dev->isoc_urbs_running)
+		pr_info("<<< isoc_urbs_running[%02X] %d", CI_CMD_R, ci_dev->isoc_urbs_running);
 
 	rc = CI_read_CMD_REPLY(wintvci, CI_CMD_R, reply, cinfo->expect_data, debug);
 	if (rc == CI_ERR_E0_USB && wintvci->slot.usbci_state == USBCI_STATE_RDY) {
